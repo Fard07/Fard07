@@ -1,0 +1,108 @@
+import pybamm
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Total number of cycles and batch size
+Cycles = 100
+batch_size = 50
+num_batches = Cycles // batch_size
+
+# Define model
+model = pybamm.lithium_ion.DFN(
+    options={
+        "particle": "Fickian diffusion",
+        "cell geometry": "arbitrary",
+        "thermal": "lumped",
+        "particle mechanics": "swelling only",
+        "SEI": "solvent-diffusion limited",
+        "SEI film resistance": "distributed",
+        "calculate discharge energy": "true",
+        "loss of active material": "stress-driven",
+    }
+)
+
+# Load and update parameters
+param = pybamm.ParameterValues("OKane2022")
+param.update({
+    "SEI solvent diffusivity [m2.s-1]": 2.5e-20,
+    "Negative electrode LAM constant proportional term [s-1]": 5.7778e-06,
+    "Positive electrode LAM constant proportional term [s-1]": 9.7778e-06,
+})
+
+# Use IDAKLU solver
+solver = pybamm.IDAKLUSolver()
+
+# Initialize combined solution and continuation state
+combined_solution = None
+initial_state = None
+
+# Run in batches
+for batch in range(num_batches):
+    print(f"Running batch {batch + 1} of {num_batches}...")
+
+    # Define experiment for current batch
+    experiment = pybamm.Experiment([
+        (
+            "Discharge at 1C until 2.5V",
+            "Charge at 0.3C until 4.2V (3 minute period)",
+            "Hold at 4.2V until C/100 (3 minute period)"
+        )
+    ] * batch_size)
+
+    # Create simulation
+    sim = pybamm.Simulation(
+        model,
+        parameter_values=param,
+        experiment=experiment,
+        solver=solver
+    )
+
+    # Continue from last solution if available
+    solution = sim.solve(initial_conditions_from=initial_state) if initial_state else sim.solve()
+    initial_state = solution
+
+    # Stitch solutions together
+    if combined_solution is None:
+        combined_solution = solution
+    else:
+        combined_solution = pybamm.Solution.concatenate(combined_solution, solution)
+
+# Estimate time per cycle
+total_time = combined_solution["Time [s]"].entries[-1]
+cycle_duration = total_time / Cycles
+
+# Helper to get discharge step mask
+def get_discharge_mask(solution, cycle_index, cycle_duration):
+    t = solution["Time [s]"].entries
+    current = solution["Current [A]"].entries
+    start = (cycle_index - 1) * cycle_duration
+    end = start + cycle_duration / 3
+    return (t >= start) & (t < end) & (current > 0.01)
+
+# Extract variables
+voltage = combined_solution["Terminal voltage [V]"].entries
+capacity = combined_solution["Discharge capacity [A.h]"].entries
+
+# Get BOL and EOL masks
+bol_mask = get_discharge_mask(combined_solution, 1, cycle_duration)
+eol_mask = get_discharge_mask(combined_solution, Cycles, cycle_duration)
+
+# Plotting
+plt.figure(figsize=(8, 5))
+if bol_mask.any():
+    plt.plot(capacity[bol_mask], voltage[bol_mask], label="BOL (Cycle 1)")
+else:
+    print("⚠️ No BOL data found.")
+
+if eol_mask.any():
+    plt.plot(capacity[eol_mask], voltage[eol_mask], label=f"EOL (Cycle {Cycles})")
+else:
+    print("⚠️ No EOL data found.")
+
+plt.xlabel("Discharge Capacity [A.h]")
+plt.ylabel("Terminal Voltage [V]")
+plt.title("Voltage vs Discharge Capacity")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
