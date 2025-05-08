@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Define number of cycles
-Cycles = 1000
+Cycles = 10
 
 # Define experiment
 experiment = pybamm.Experiment(
@@ -61,8 +61,9 @@ capacity = solution["Discharge capacity [A.h]"].entries
 bol_mask = get_discharge_mask(solution, 1, cycle_duration)
 eol_mask = get_discharge_mask(solution, Cycles, cycle_duration)
 
-# Plotting
+# Plotting with larger fonts
 plt.figure(figsize=(8, 5))
+
 if bol_mask.any():
     plt.plot(capacity[bol_mask], voltage[bol_mask], label="BOL (Cycle 1)")
 else:
@@ -73,11 +74,13 @@ if eol_mask.any():
 else:
     print("⚠️ No EOL data found.")
 
-plt.xlabel("Discharge Capacity [A.h]")
-plt.ylabel("Terminal Voltage [V]")
-plt.title("Voltage vs Discharge Capacity")
-plt.legend()
-plt.grid(True)
+plt.xlabel("Discharge Capacity [A.h]", fontsize=14)
+plt.ylabel("Terminal Voltage [V]", fontsize=14)
+plt.title("Voltage vs Discharge Capacity", fontsize=16)
+plt.legend(fontsize=12)
+plt.grid(False)
+plt.tick_params(labelsize=12)
 plt.tight_layout()
+# Save the plot
+plt.savefig("voltage_vs_capacity.png", dpi=300)  # for high-res PNG
 plt.show()
-
