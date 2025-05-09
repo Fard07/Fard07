@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Define number of cycles
-Cycles = 10
+Cycles = 1170
 
 # Define experiment
 experiment = pybamm.Experiment(
@@ -61,9 +61,8 @@ capacity = solution["Discharge capacity [A.h]"].entries
 bol_mask = get_discharge_mask(solution, 1, cycle_duration)
 eol_mask = get_discharge_mask(solution, Cycles, cycle_duration)
 
-# Plotting with larger fonts
+# Plot Voltage vs Capacity
 plt.figure(figsize=(8, 5))
-
 if bol_mask.any():
     plt.plot(capacity[bol_mask], voltage[bol_mask], label="BOL (Cycle 1)")
 else:
@@ -81,6 +80,53 @@ plt.legend(fontsize=12)
 plt.grid(False)
 plt.tick_params(labelsize=12)
 plt.tight_layout()
-# Save the plot
-plt.savefig("voltage_vs_capacity.png", dpi=300)  # for high-res PNG
+plt.savefig("voltage_vs_capacity.png", dpi=300)
+plt.show()
+
+# Analyze LLI and LAM over charge throughput
+LLI = np.zeros(Cycles)
+LAM_neg = np.zeros(Cycles)
+LAM_pos = np.zeros(Cycles)
+throughput = np.zeros(Cycles)
+
+time = solution["Time [s]"].entries
+current = solution["Current [A]"].entries
+
+for i in range(1, Cycles + 1):
+    start = (i - 1) * cycle_duration
+    end = i * cycle_duration
+    idx = (time >= start) & (time < end)
+    t_mid = time[idx]
+    I_mid = current[idx]
+
+    Q_charge = -np.trapezoid(I_mid[I_mid < 0], t_mid[I_mid < 0]) / 3600  # [Ah]
+    throughput[i - 1] = throughput[i - 2] + Q_charge if i > 1 else Q_charge
+
+    idx_end = np.where(time >= end)[0][0]
+    LLI[i - 1] = solution["Loss of lithium inventory [%]"].entries[idx_end]
+    LAM_neg[i - 1] = solution["Loss of active material in negative electrode [%]"].entries[idx_end]
+    LAM_pos[i - 1] = solution["Loss of active material in positive electrode [%]"].entries[idx_end]
+
+# Plot LLI vs Charge Throughput
+plt.figure(figsize=(8, 5))
+plt.plot(throughput, LLI, label="LLI")
+plt.xlabel("Charge Throughput [Ah]", fontsize=14)
+plt.ylabel("LLI [%]", fontsize=14)
+plt.title("Loss of Lithium Inventory vs Charge Throughput", fontsize=16)
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("lli_vs_throughput.png", dpi=300)
+plt.show()
+
+# Plot LAM vs Charge Throughput
+plt.figure(figsize=(8, 5))
+plt.plot(throughput, LAM_neg, label="LAM - Negative Electrode")
+plt.plot(throughput, LAM_pos, label="LAM - Positive Electrode")
+plt.xlabel("Charge Throughput [Ah]", fontsize=14)
+plt.ylabel("LAM [%]", fontsize=14)
+plt.title("Loss of Active Material vs Charge Throughput", fontsize=16)
+plt.legend(fontsize=12)
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("lam_vs_throughput.png", dpi=300)
 plt.show()
