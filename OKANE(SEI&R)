@@ -1,0 +1,182 @@
+import pybamm
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Define number of cycles
+Cycles = 1170
+
+# Define experiment
+experiment = pybamm.Experiment(
+    [
+        (
+            "Discharge at 1C until 2.5V",
+            "Charge at 0.3C until 4.2V (3 minute period)",
+            "Hold at 4.2V until C/100 (3 minute period)"
+        )
+    ] * Cycles
+)
+
+# Define model
+model = pybamm.lithium_ion.DFN(
+    options={
+        "particle": "Fickian diffusion",
+        "cell geometry": "arbitrary",
+        "thermal": "lumped",
+        "particle mechanics": "swelling only",
+        "SEI": "solvent-diffusion limited",
+        "SEI film resistance": "distributed",
+        "calculate discharge energy": "true",
+        "loss of active material": "stress-driven",
+    }
+)
+
+# Load and update parameters
+param = pybamm.ParameterValues("OKane2022")
+param.update({
+    "SEI solvent diffusivity [m2.s-1]": 2.5e-20,
+    "Negative electrode LAM constant proportional term [s-1]": 5.7778e-06,
+    "Positive electrode LAM constant proportional term [s-1]": 9.7778e-06,
+})
+
+# Create and solve simulation
+sim = pybamm.Simulation(
+    model,
+    parameter_values=param,
+    experiment=experiment,
+    solver=pybamm.IDAKLUSolver()
+)
+solution = sim.solve()
+
+# Time vector and cycle duration
+time = solution["Time [s]"].entries
+total_time = time[-1]
+cycle_duration = total_time / Cycles
+
+# Pre-allocate arrays
+throughput        = np.zeros(Cycles)
+LLI               = np.zeros(Cycles)
+LAM_neg           = np.zeros(Cycles)
+LAM_pos           = np.zeros(Cycles)
+SEI_growth        = np.zeros(Cycles)
+resistance_growth = np.zeros(Cycles)
+
+current = solution["Current [A]"].entries
+
+# Grab SEI entries (event-only, spatial)
+try:
+    var_sei = solution["Negative SEI thickness [m]"]
+except KeyError:
+    var_sei = solution["SEI thickness [m]"]
+
+arr_sei = var_sei.entries  # shape (n_events, n_spatial_points)
+# collapse to a scalar per event by x-averaging
+if arr_sei.ndim > 1:
+    arr_sei = np.mean(arr_sei, axis=1)
+
+# Grab resistance entries (full time series)
+var_R = solution["Resistance [Ohm]"]
+arr_R = var_R.entries
+
+# Helper to clamp an index
+def clamp(idx, length):
+    return idx if idx < length else length - 1
+
+# Helper: discharge mask for BOL/EOL plotting
+def get_discharge_mask(sol, cycle_index):
+    t = sol["Time [s]"].entries
+    I = sol["Current [A]"].entries
+    start = (cycle_index - 1) * cycle_duration
+    end = start + cycle_duration / 3
+    return (t >= start) & (t < end) & (I > 0.01)
+
+# Plot Voltage vs Capacity at BOL & EOL
+voltage  = solution["Terminal voltage [V]"].entries
+capacity = solution["Discharge capacity [A.h]"].entries
+bol_mask = get_discharge_mask(solution, 1)
+eol_mask = get_discharge_mask(solution, Cycles)
+
+plt.figure(figsize=(8, 5))
+if bol_mask.any():
+    plt.plot(capacity[bol_mask], voltage[bol_mask], label="BOL (Cycle 1)")
+if eol_mask.any():
+    plt.plot(capacity[eol_mask], voltage[eol_mask], label=f"EOL (Cycle {Cycles})")
+plt.xlabel("Discharge Capacity [A·h]", fontsize=14)
+plt.ylabel("Terminal Voltage [V]", fontsize=14)
+plt.title("Voltage vs Discharge Capacity", fontsize=16)
+plt.legend(fontsize=12)
+plt.grid(False)
+plt.tight_layout()
+plt.show()
+
+# Main loop: extract per-cycle metrics
+for i in range(1, Cycles + 1):
+    # Define cycle window
+    start = (i - 1) * cycle_duration
+    end   = i * cycle_duration
+
+    # 1) Charge throughput
+    mask  = (time >= start) & (time < end)
+    t_mid = time[mask]
+    I_mid = current[mask]
+    Qc    = -np.trapezoid(I_mid[I_mid < 0], t_mid[I_mid < 0]) / 3600
+    throughput[i-1] = throughput[i-2] + Qc if i > 1 else Qc
+
+    # 2) find index in full time series at cycle end
+    idx_time_end = np.where(time >= end)[0][0]
+
+    # 3) LLI & LAM
+    arr_LLI     = solution["Loss of lithium inventory [%]"].entries
+    arr_LAM_neg = solution["Loss of active material in negative electrode [%]"].entries
+    arr_LAM_pos = solution["Loss of active material in positive electrode [%]"].entries
+
+    LLI[i-1]     = arr_LLI[clamp(idx_time_end, arr_LLI.size)]
+    LAM_neg[i-1] = arr_LAM_neg[clamp(idx_time_end, arr_LAM_neg.size)]
+    LAM_pos[i-1] = arr_LAM_pos[clamp(idx_time_end, arr_LAM_pos.size)]
+
+    # 4) SEI growth by cycle‐index mapping
+    SEI_growth[i-1] = arr_sei[i-1] if i-1 < arr_sei.size else arr_sei[-1]
+
+    # 5) Resistance growth (clamped)
+    resistance_growth[i-1] = arr_R[clamp(idx_time_end, arr_R.size)]
+
+# Plot Loss of Lithium Inventory vs Throughput
+plt.figure(figsize=(8, 5))
+plt.plot(throughput, LLI, marker='o')
+plt.xlabel("Charge Throughput [A·h]", fontsize=14)
+plt.ylabel("LLI [%]", fontsize=14)
+plt.title("Loss of Lithium Inventory vs Charge Throughput", fontsize=16)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Plot Loss of Active Material vs Throughput
+plt.figure(figsize=(8, 5))
+plt.plot(throughput, LAM_neg, marker='o', label="LAM – Negative")
+plt.plot(throughput, LAM_pos, marker='s', label="LAM – Positive")
+plt.xlabel("Charge Throughput [A·h]", fontsize=14)
+plt.ylabel("LAM [%]", fontsize=14)
+plt.title("Loss of Active Material vs Charge Throughput", fontsize=16)
+plt.legend(fontsize=12)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Plot SEI Growth vs Throughput
+plt.figure(figsize=(8, 5))
+plt.plot(throughput, SEI_growth * 1e9, marker='o')  # convert m to nm
+plt.xlabel("Charge Throughput [A·h]", fontsize=14)
+plt.ylabel("SEI Thickness [nm]", fontsize=14)
+plt.title("SEI Growth vs Charge Throughput", fontsize=16)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Plot Resistance Growth vs Throughput
+plt.figure(figsize=(8, 5))
+plt.plot(throughput, resistance_growth, marker='o')
+plt.xlabel("Charge Throughput [A·h]", fontsize=14)
+plt.ylabel("Resistance [Ω]", fontsize=14)
+plt.title("Resistance Growth vs Charge Throughput", fontsize=16)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
