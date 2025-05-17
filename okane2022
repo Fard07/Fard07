@@ -1,7 +1,7 @@
 import pybamm
 import numpy as np
 import matplotlib.pyplot as plt
-
+pybamm.set_logging_level("INFO")
 # Define number of cycles
 Cycles = 1170
 
@@ -20,6 +20,7 @@ experiment = pybamm.Experiment(
 model = pybamm.lithium_ion.DFN(
     options={
         "particle": "Fickian diffusion",
+
         "cell geometry": "arbitrary",
         "thermal": "lumped",
         "particle mechanics": "swelling only",
@@ -130,3 +131,4 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig("lam_vs_throughput.png", dpi=300)
 plt.show()
+
