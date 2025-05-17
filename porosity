@@ -2,6 +2,8 @@ import pybamm
 import numpy as np
 import matplotlib.pyplot as plt
 
+pybamm.set_logging_level("INFO")
+
 # Set up the model
 model = pybamm.lithium_ion.DFN(
     {
@@ -18,22 +20,25 @@ model = pybamm.lithium_ion.DFN(
 param = pybamm.ParameterValues("OKane2022")
 param.update({
     "SEI solvent diffusivity [m2.s-1]": 2.5e-20,
+    "Negative electrode LAM constant proportional term [s-1]": 5.7778e-06,
+    "Positive electrode LAM constant proportional term [s-1]": 9.7778e-06,
     "Upper voltage cut-off [V]": 4.2,
     "Lower voltage cut-off [V]": 2.5,
 })
 
+
 # Define experiment: 1000 full cycles
-Cycles = 1000
+Cycles = 1170
 experiment = pybamm.Experiment([
     (
         "Discharge at 1C until 2.5V",
-        "Charge at 0.5C until 4.2V",
+        "Charge at 0.3C until 4.2V",
         "Hold at 4.2V until C/100"
     )
 ] * Cycles)
 
 # Create and solve simulation
-sim = pybamm.Simulation(model, parameter_values=param, experiment=experiment)
+sim = pybamm.Simulation(model, parameter_values=param, experiment=experiment, solver=pybamm.IDAKLUSolver())
 solution = sim.solve()
 
 # Time and cycles
@@ -66,10 +71,10 @@ cycles = np.arange(1, Cycles + 1)
 plt.figure(figsize=(8, 5))
 plt.plot(cycles, neg_poro, label="Negative Electrode")
 plt.plot(cycles, pos_poro, label="Positive Electrode")
-plt.xlabel("Cycle Number", fontsize=13)
-plt.ylabel("Average Porosity", fontsize=13)
-plt.title("Porosity Degradation over Cycles", fontsize=15)
-plt.grid(True)
+plt.xlabel("Cycle Number", fontsize=14)
+plt.ylabel("Average Porosity", fontsize=14)
+plt.title("Porosity Degradation over Cycles", fontsize=16)
+plt.grid(False)
 plt.legend()
 plt.tight_layout()
 plt.savefig("porosity_vs_cycles.png", dpi=300)
@@ -79,10 +84,10 @@ plt.show()
 plt.figure(figsize=(8, 5))
 plt.plot(LLI, neg_poro, label="Negative Electrode")
 plt.plot(LLI, pos_poro, label="Positive Electrode")
-plt.xlabel("Loss of Lithium Inventory [%]", fontsize=13)
-plt.ylabel("Average Porosity", fontsize=13)
-plt.title("Porosity vs LLI", fontsize=15)
-plt.grid(True)
+plt.xlabel("Loss of Lithium Inventory [%]", fontsize=14)
+plt.ylabel("Average Porosity", fontsize=14)
+plt.title("Porosity vs LLI", fontsize=16)
+plt.grid(False)
 plt.legend()
 plt.tight_layout()
 plt.savefig("porosity_vs_lli.png", dpi=300)
@@ -92,10 +97,10 @@ plt.show()
 plt.figure(figsize=(8, 5))
 plt.plot(LAM_neg, neg_poro, label="Negative Electrode")
 plt.plot(LAM_pos, pos_poro, label="Positive Electrode")
-plt.xlabel("Loss of Active Material [%]", fontsize=13)
-plt.ylabel("Average Porosity", fontsize=13)
-plt.title("Porosity vs LAM", fontsize=15)
-plt.grid(True)
+plt.xlabel("Loss of Active Material [%]", fontsize=14)
+plt.ylabel("Average Porosity", fontsize=14)
+plt.title("Porosity vs LAM", fontsize=16)
+plt.grid(False)
 plt.legend()
 plt.tight_layout()
 plt.savefig("porosity_vs_lam.png", dpi=300)
