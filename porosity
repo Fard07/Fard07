@@ -4,104 +4,114 @@ import matplotlib.pyplot as plt
 
 pybamm.set_logging_level("INFO")
 
-# Set up the model
-model = pybamm.lithium_ion.DFN(
-    {
-        "SEI": "solvent-diffusion limited",
-        "SEI porosity change": "true",
-        "SEI film resistance": "distributed",
-        "thermal": "lumped",
-        "particle mechanics": "swelling only",
-        "loss of active material": "stress-driven",
-    }
-)
+# Define model with explicit phase variables
+model = pybamm.lithium_ion.DFN({
+    "particle phases": ("2", "1"),
+    "open-circuit potential": (("single", "current sigmoid"), "single"),
+    "particle mechanics": "swelling only",
+    "operating mode": "current",
 
-# Parameter values
-param = pybamm.ParameterValues("OKane2022")
-param.update({
-    "SEI solvent diffusivity [m2.s-1]": 2.5e-20,
-    "Negative electrode LAM constant proportional term [s-1]": 5.7778e-06,
-    "Positive electrode LAM constant proportional term [s-1]": 9.7778e-06,
-    "Upper voltage cut-off [V]": 4.2,
-    "Lower voltage cut-off [V]": 2.5,
 })
 
+# Load and validate parameters
+parameter_values = pybamm.ParameterValues("Chen2020_composite")
+parameter_values.update({
+# Primary: Graphite
+    "Primary: Maximum concentration in negative electrode [mol.m-3]": 28700,
+    "Primary: Initial concentration in negative electrode [mol.m-3]": 23000,
+    "Primary: Negative particle diffusivity [m2.s-1]": 5.5e-14,
+    "Primary: Negative electrode partial molar volume [m3.mol-1]": 3.1e-6,
+    "Primary: Negative electrode Young's modulus [Pa]": 1e9,
+    "Primary: Negative electrode Poisson's ratio": 0.3,
+    "Primary: Negative electrode reference concentration for free of deformation [mol.m-3]": 23000,
+    "Primary: Negative electrode volume change": 0.1,  # Nonzero for swelling model
 
-# Define experiment: 1000 full cycles
-Cycles = 1170
+    # Secondary: Silicon
+    "Secondary: Maximum concentration in negative electrode [mol.m-3]": 260000,
+    "Secondary: Initial concentration in negative electrode [mol.m-3]": 200000,
+    "Secondary: Negative particle diffusivity [m2.s-1]": 1e-15,
+    "Secondary: Negative electrode partial molar volume [m3.mol-1]": 9e-6,
+    "Secondary: Negative electrode Young's modulus [Pa]": 5e9,
+    "Secondary: Negative electrode Poisson's ratio": 0.28,
+    "Secondary: Negative electrode reference concentration for free of deformation [mol.m-3]": 200000,
+    "Secondary: Negative electrode volume change": 2.0,  # Large swelling
+
+    # Positive electrode
+    "Positive electrode partial molar volume [m3.mol-1]": 5e-6,
+    "Positive electrode Young's modulus [Pa]": 2e10,
+    "Positive electrode Poisson's ratio": 0.25,
+    "Positive electrode reference concentration for free of deformation [mol.m-3]": 25777,
+    "Positive electrode initial concentration [mol.m-3]": 25800,
+    "Positive electrode volume change": 0.0,
+}, check_already_exists=False)
+
+# Experiment
+C_rate = 0.1
 experiment = pybamm.Experiment([
-    (
-        "Discharge at 1C until 2.5V",
-        "Charge at 0.3C until 4.2V",
-        "Hold at 4.2V until C/100"
-    )
-] * Cycles)
+    f"Discharge at {C_rate}C until 3.0 V",
+    f"Charge at {C_rate}C until 4.2 V",
+])
 
-# Create and solve simulation
-sim = pybamm.Simulation(model, parameter_values=param, experiment=experiment, solver=pybamm.IDAKLUSolver())
+# Mechanical parameter validation
+if parameter_values["Secondary: Negative electrode Young's modulus [Pa]"] < 1e9:
+    raise ValueError("Unrealistic Young's modulus for silicon")
+
+# Enhanced solver configuration
+solver = pybamm.CasadiSolver(
+    mode="safe",
+    atol=1e-8,
+    rtol=1e-6,
+    max_step_decrease_count=5,
+    dt_max=30
+)
+
+var_pts = {
+    "x_n": 20,
+    "x_s": 20,
+    "x_p": 20,
+    "r_n_prim": 15,
+    "r_n_sec": 15,
+    "r_p": 15
+}
+
+
+# Run simulation
+sim = pybamm.Simulation(
+    model,
+    parameter_values=parameter_values,
+    experiment=experiment,
+    solver=solver,
+    var_pts=var_pts
+)
 solution = sim.solve()
 
-# Time and cycles
+
+
+# Extract time, particle radii, and voltage from the solution
 time = solution["Time [s]"].entries
-total_time = time[-1]
-cycle_duration = total_time / Cycles
+R_primary = solution["Negative primary particle radius [m]"].entries
+R_secondary = solution["Negative secondary particle radius [m]"].entries
+voltage = solution["Voltage [V]"].entries
 
-# Arrays to store data
-LLI, LAM_neg, LAM_pos = [], [], []
-neg_poro, pos_poro = [], []
-
-# Extract average porosity and degradation metrics per cycle
-for i in range(1, Cycles + 1):
-    end_time = i * cycle_duration
-    idx = np.where(time <= end_time)[0][-1]  # Get last time index for cycle i
-
-    LLI.append(solution["Loss of lithium inventory [%]"].entries[idx])
-    LAM_neg.append(solution["Loss of active material in negative electrode [%]"].entries[idx])
-    LAM_pos.append(solution["Loss of active material in positive electrode [%]"].entries[idx])
-
-    neg_avg = solution["X-averaged negative electrode porosity"].entries[idx]
-    pos_avg = solution["X-averaged positive electrode porosity"].entries[idx]
-
-    neg_poro.append(neg_avg)
-    pos_poro.append(pos_avg)
-
-cycles = np.arange(1, Cycles + 1)
-
-# ----- Plot 1: Porosity vs Cycles -----
-plt.figure(figsize=(8, 5))
-plt.plot(cycles, neg_poro, label="Negative Electrode")
-plt.plot(cycles, pos_poro, label="Positive Electrode")
-plt.xlabel("Cycle Number", fontsize=14)
-plt.ylabel("Average Porosity", fontsize=14)
-plt.title("Porosity Degradation over Cycles", fontsize=16)
-plt.grid(False)
+# Plot particle radii (in micrometers) and voltage
+plt.figure(figsize=(10, 6))
+plt.plot(time, R_primary * 1e6, label="Graphite Particle Radius (μm)")
+plt.plot(time, R_secondary * 1e6, label="Silicon Particle Radius (μm)")
+plt.xlabel("Time (s)")
+plt.ylabel("Particle Radius (μm)")
+plt.title("Composite Electrode Swelling Dynamics")
 plt.legend()
+plt.grid(True)
 plt.tight_layout()
-plt.savefig("porosity_vs_cycles.png", dpi=300)
 plt.show()
 
-# ----- Plot 2: Porosity vs LLI -----
-plt.figure(figsize=(8, 5))
-plt.plot(LLI, neg_poro, label="Negative Electrode")
-plt.plot(LLI, pos_poro, label="Positive Electrode")
-plt.xlabel("Loss of Lithium Inventory [%]", fontsize=14)
-plt.ylabel("Average Porosity", fontsize=14)
-plt.title("Porosity vs LLI", fontsize=16)
-plt.grid(False)
+# Optionally, plot voltage separately
+plt.figure(figsize=(10, 4))
+plt.plot(time, voltage, label="Cell Voltage (V)", color="purple")
+plt.xlabel("Time (s)")
+plt.ylabel("Voltage (V)")
+plt.title("Cell Voltage Profile")
 plt.legend()
+plt.grid(True)
 plt.tight_layout()
-plt.savefig("porosity_vs_lli.png", dpi=300)
-plt.show()
-
-# ----- Plot 3: Porosity vs LAM -----
-plt.figure(figsize=(8, 5))
-plt.plot(LAM_neg, neg_poro, label="Negative Electrode")
-plt.plot(LAM_pos, pos_poro, label="Positive Electrode")
-plt.xlabel("Loss of Active Material [%]", fontsize=14)
-plt.ylabel("Average Porosity", fontsize=14)
-plt.title("Porosity vs LAM", fontsize=16)
-plt.grid(False)
-plt.legend()
-plt.tight_layout()
-plt.savefig("porosity_vs_lam.png", dpi=300)
 plt.show()
