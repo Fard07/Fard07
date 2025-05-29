@@ -1,0 +1,187 @@
+# Volume change functions from Ai2020 parameters
+import pybamm
+import matplotlib.pyplot as plt
+pybamm.set_logging_level("INFO")
+
+model = pybamm.lithium_ion.DFN({
+    "particle phases": ("2", "1"),
+    "open-circuit potential": (("single", "current sigmoid"), "single"),
+    "particle mechanics": ("swelling only", "none"),
+    "loss of active material": ("stress-driven", "none"),
+    "particle": "Fickian diffusion",
+    "cell geometry": "arbitrary",
+    
+})
+
+def graphite_volume_change_Ai2020(sto):
+    p1 = 145.907
+    p2 = -681.229
+    p3 = 1334.442
+    p4 = -1415.710
+    p5 = 873.906
+    p6 = -312.528
+    p7 = 60.641
+    p8 = -5.706
+    p9 = 0.386
+    p10 = -4.966e-05
+    t_change = (
+        p1 * sto**9
+        + p2 * sto**8
+        + p3 * sto**7
+        + p4 * sto**6
+        + p5 * sto**5
+        + p6 * sto**4
+        + p7 * sto**3
+        + p8 * sto**2
+        + p9 * sto
+        + p10
+    )
+    return t_change
+
+def lico2_volume_change_Ai2020(sto):
+    omega = pybamm.Parameter("Positive electrode partial molar volume [m3.mol-1]")
+    c_s_max = pybamm.Parameter("Maximum concentration in positive electrode [mol.m-3]")
+    t_change = omega * c_s_max * sto
+    return t_change
+
+parameter_values = pybamm.ParameterValues("Chen2020_composite")
+second = 0.1
+parameter_values.update(
+    {
+        "Primary: Negative electrode reference concentration for free of deformation [mol.m-3]": 0.0,
+        "Secondary: Negative electrode reference concentration for free of deformation [mol.m-3]": 0.0,
+        "Primary: Negative electrode LAM constant proportional term [s-1]": 1e-4 / 3600,
+        "Secondary: Negative electrode LAM constant proportional term [s-1]": 1e-4
+        / 3600
+        * second,
+        "Positive electrode LAM constant proportional term [s-1]": 1e-4 / 3600,
+        "Primary: Negative electrode partial molar volume [m3.mol-1]": 3.1e-06,
+        "Primary: Negative electrode Young's modulus [Pa]": 15000000000.0,
+        "Primary: Negative electrode Poisson's ratio": 0.3,
+        "Primary: Negative electrode critical stress [Pa]": 60000000.0,
+        "Secondary: Negative electrode critical stress [Pa]": 60000000.0,
+        "Primary: Negative electrode LAM constant exponential term": 2.0,
+        "Secondary: Negative electrode LAM constant exponential term": 2.0,
+        "Secondary: Negative electrode partial molar volume [m3.mol-1]": 3.1e-06
+        * second,
+        "Secondary: Negative electrode Young's modulus [Pa]": 15000000000.0 * second,
+        "Secondary: Negative electrode Poisson's ratio": 0.3 * second,
+        "Negative electrode reference concentration for free of deformation [mol.m-3]": 0.0,
+        "Primary: Negative electrode volume change": graphite_volume_change_Ai2020,
+        "Secondary: Negative electrode volume change": graphite_volume_change_Ai2020,
+        "Positive electrode partial molar volume [m3.mol-1]": -7.28e-07,
+        "Positive electrode Young's modulus [Pa]": 375000000000.0,
+        "Positive electrode Poisson's ratio": 0.2,
+        "Positive electrode critical stress [Pa]": 375000000.0,
+        "Positive electrode LAM constant exponential term": 2.0,
+        "Positive electrode reference concentration for free of deformation [mol.m-3]": 0.0,
+        "Positive electrode volume change": lico2_volume_change_Ai2020,
+    },
+    check_already_exists=False,
+)
+
+# sim = pybamm.Simulation(model, parameter_values=parameter_values)
+# sim.solve([0, 4500])
+experiment = pybamm.Experiment(
+    [
+        "Discharge at 1C until 3 V",
+        "Rest for 600 seconds",
+        "Charge at 1C until 4.2 V",
+        "Hold at 4.199 V for 600 seconds",
+    ]
+)
+sim = pybamm.Simulation(
+    model,
+    experiment=experiment,
+    parameter_values=parameter_values,
+    discretisation_kwargs={"remove_independent_variables_from_rhs": True},
+)
+solution = sim.solve(calc_esoh=False)
+
+# Plotting variables
+
+
+variables_to_plot = [
+
+
+    "X-averaged negative electrode porosity",
+    "Voltage [V]",
+    "Current [A]",
+    "X-averaged negative electrode primary active material volume fraction",
+    "X-averaged negative electrode secondary active material volume fraction",
+    "X-averaged negative secondary particle radius [m]"
+]
+
+t = solution["Time [s]"].entries
+
+for var in variables_to_plot:
+    plt.figure(figsize=(10, 6))
+    y = solution[var].entries
+    plt.plot(t, y)
+    plt.title(var)
+    plt.xlabel("Time [s]",fontsize=14)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# Extract time and concentrations from the solution object
+
+primary_conc = solution["Average negative primary particle concentration"].entries
+secondary_conc = solution["Average negative secondary particle concentration"].entries
+
+plt.figure(figsize=(10, 6))
+plt.plot(t, primary_conc, label="Average negative primary particle concentration")
+plt.plot(t, secondary_conc, label="Average negative secondary particle concentration")
+plt.xlabel("Time [s]",fontsize=14)
+plt.ylabel("Concentration [mol.m-3]",fontsize=14)
+plt.title("Average Negative Primary and Secondary Particle Concentrations")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+
+# Volume fractions
+primary_vol_frac = solution["X-averaged negative electrode primary active material volume fraction"].entries
+secondary_vol_frac = solution["X-averaged negative electrode secondary active material volume fraction"].entries
+
+plt.figure(figsize=(10, 6))
+plt.plot(t, primary_vol_frac, label="X-averaged negative electrode primary active material volume fraction")
+plt.plot(t, secondary_vol_frac, label="X-averaged negative electrode secondary active material volume fraction")
+plt.xlabel("Time [s]",fontsize=14)
+plt.ylabel("Volume Fraction",fontsize=14)
+plt.title("X-averaged Negative Electrode Primary and Secondary Active Material Volume Fractions")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+# Tangential stresses
+primary_stress = solution["X-averaged negative primary particle surface tangential stress [Pa]"].entries
+secondary_stress = solution["X-averaged negative secondary particle surface tangential stress [Pa]"].entries
+
+plt.figure(figsize=(10, 6))
+plt.plot(t, primary_stress, label="X-averaged negative primary particle surface tangential stress [Pa]")
+plt.plot(t, secondary_stress, label="X-averaged negative secondary particle surface tangential stress [Pa]")
+plt.xlabel("Time [s]",fontsize=14)
+plt.ylabel("Stress [Pa]",fontsize=14)
+plt.title("X-averaged Negative Primary and Secondary Particle Surface Tangential Stresses")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+j_primary = solution["X-averaged negative electrode primary volumetric interfacial current density [A.m-3]"].entries
+j_secondary = solution["X-averaged negative electrode secondary volumetric interfacial current density [A.m-3]"].entries
+
+plt.figure(figsize=(10, 6))
+plt.plot(t, j_primary, label="Primary volumetric interfacial current density")
+plt.plot(t, j_secondary, label="Secondary volumetric interfacial current density")
+plt.xlabel("Time [s]",fontsize=14)
+plt.ylabel("Volumetric Interfacial Current Density [A.m$^{-3}$]",fontsize=14)
+plt.title("Individual Volumetric Interfacial Current Densities (Negative Electrode)")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
