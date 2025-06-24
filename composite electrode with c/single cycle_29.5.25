@@ -7,12 +7,13 @@ model = pybamm.lithium_ion.DFN({
     "particle phases": ("2", "1"),
     "open-circuit potential": (("single", "current sigmoid"), "single"),
     "particle mechanics": ("swelling only", "none"),
-    "loss of active material": ("stress-driven", "none"),
+    #"loss of active material": ("stress-driven", "none"),
+    "SEI": "solvent-diffusion limited",
+    "SEI porosity change": "true",
     "particle": "Fickian diffusion",
     "cell geometry": "arbitrary",
-    
 })
-
+''' 
 def graphite_volume_change_Ai2020(sto):
     p1 = 145.907
     p2 = -681.229
@@ -43,9 +44,10 @@ def lico2_volume_change_Ai2020(sto):
     c_s_max = pybamm.Parameter("Maximum concentration in positive electrode [mol.m-3]")
     t_change = omega * c_s_max * sto
     return t_change
-
+'''
 parameter_values = pybamm.ParameterValues("Chen2020_composite")
-second = 0.1
+
+''' 
 parameter_values.update(
     {
         "Primary: Negative electrode reference concentration for free of deformation [mol.m-3]": 0.0,
@@ -79,85 +81,97 @@ parameter_values.update(
     },
     check_already_exists=False,
 )
-
+'''
 # sim = pybamm.Simulation(model, parameter_values=parameter_values)
 # sim.solve([0, 4500])
 experiment = pybamm.Experiment(
     [
-        "Discharge at 1C until 3 V",
-        "Rest for 600 seconds",
-        "Charge at 1C until 4.2 V",
-        "Hold at 4.199 V for 600 seconds",
-    ]
+            "Discharge at 1C until 2.5V",
+            "Charge at 0.3C until 4.2V (3 minute period)",
+            "Hold at 4.2V until C/100 (3 minute period)"
+    ] * 1
 )
+solver= pybamm.IDAKLUSolver()
 sim = pybamm.Simulation(
     model,
     experiment=experiment,
     parameter_values=parameter_values,
+    solver=solver,
     discretisation_kwargs={"remove_independent_variables_from_rhs": True},
 )
 solution = sim.solve(calc_esoh=False)
 
 # Plotting variables
+t = solution["Time [s]"].entries
 
 
-variables_to_plot = [
+'''variables_to_plot = [
 
-
-    "X-averaged negative electrode porosity",
     "Voltage [V]",
     "Current [A]",
     "X-averaged negative electrode primary active material volume fraction",
     "X-averaged negative electrode secondary active material volume fraction",
     "X-averaged negative secondary particle radius [m]"
-]
-
+]'''
+'''
 t = solution["Time [s]"].entries
 
-for var in variables_to_plot:
-    plt.figure(figsize=(10, 6))
-    y = solution[var].entries
-    plt.plot(t, y)
-    plt.title(var)
-    plt.xlabel("Time [s]",fontsize=14)
-
-    plt.tight_layout()
-    plt.show()
-
-
-# Extract time and concentrations from the solution object
-
-primary_conc = solution["Average negative primary particle concentration"].entries
-secondary_conc = solution["Average negative secondary particle concentration"].entries
-
+# negative electrode particle radius change
+x_neg = solution["X-averaged negative primary particle surface displacement [m]"].entries
+x_neg_cc = solution["Negative primary particle surface displacement [m]"].entries[0,:]
+x_neg_ss = solution["Negative primary particle surface displacement [m]"].entries[-1,:]
+# Extract negative primary particle radius data
+r_p_neg = solution["X-averaged negative secondary particle surface displacement [m]"].entries
+r_p_neg_cc = solution["Negative secondary particle surface displacement [m]"].entries[0,:]
+r_p_neg_ss = solution["Negative secondary particle surface displacement [m]"].entries[-1,:]
 plt.figure(figsize=(10, 6))
-plt.plot(t, primary_conc, label="Average negative primary particle concentration")
-plt.plot(t, secondary_conc, label="Average negative secondary particle concentration")
+plt.plot(t, x_neg, label="Avg Gr particle surface displacement [m]")
+plt.plot(t, x_neg_cc, label="Gr particle surface displacement at cc[m]")
+plt.plot(t, x_neg_ss, label="Gr particle surface displacement at ss[m]")
+plt.plot(t, r_p_neg, label="Avg Si particle surface displacement [m]")
+plt.plot(t, r_p_neg_cc, label="Si particle surface displacement at cc[m]")
+plt.plot(t, r_p_neg_ss, label="Si particle surface displacement at ss[m]")
 plt.xlabel("Time [s]",fontsize=14)
-plt.ylabel("Concentration [mol.m-3]",fontsize=14)
-plt.title("Average Negative Primary and Secondary Particle Concentrations")
+plt.ylabel("particle displacement [mol.m-3]",fontsize=14)
+plt.title("Average Negative Primary and Secondary Particle surface displacement [m] ",fontsize=14)
 plt.legend()
 
 plt.tight_layout()
+plt.savefig("Negative electrode porosity",dpi=1200)
+plt.show() '''
+
+# Negative electrode porosity change
+Qt = solution["Throughput capacity [A.h]"].entries
+t = solution["Time [s]"].entries
+por_neg = solution["X-averaged negative electrode porosity"].entries
+por_neg_sep = solution["Negative electrode porosity"].entries[-1,:]
+por_neg_cc = solution["Negative electrode porosity"].entries[0,:]
+plt.figure(figsize=(10, 6))
+plt.plot(Qt, por_neg, label="Average")
+plt.plot(Qt, por_neg_sep, label="Near separator", linestyle="dotted")
+plt.plot(Qt, por_neg_cc, label="Near current collector", linestyle="dashed")
+plt.xlabel("Throughput capacity [A.h]", fontsize=14)
+plt.ylabel("Negative electrode porosity", fontsize=14)
+plt.legend()
+plt.savefig("Negative electrode porosity",dpi=1200)
 plt.show()
 
-
-# Volume fractions
-primary_vol_frac = solution["X-averaged negative electrode primary active material volume fraction"].entries
-secondary_vol_frac = solution["X-averaged negative electrode secondary active material volume fraction"].entries
+'''# Volume fractions
+primary_vol_frac = solution["Negative electrode primary active material volume fraction"].entries[-1, :]
+secondary_vol_frac = solution["Negative electrode secondary active material volume fraction"].entries[-1, :]
 
 plt.figure(figsize=(10, 6))
 plt.plot(t, primary_vol_frac, label="X-averaged negative electrode primary active material volume fraction")
-plt.plot(t, secondary_vol_frac, label="X-averaged negative electrode secondary active material volume fraction")
+#plt.plot(t, secondary_vol_frac, label="X-averaged negative electrode secondary active material volume fraction")
 plt.xlabel("Time [s]",fontsize=14)
 plt.ylabel("Volume Fraction",fontsize=14)
 plt.title("X-averaged Negative Electrode Primary and Secondary Active Material Volume Fractions")
 plt.legend()
 
 plt.tight_layout()
-plt.show()
+plt.show()'''
 
-# Tangential stresses
+'''# Tangential stresses
 primary_stress = solution["X-averaged negative primary particle surface tangential stress [Pa]"].entries
 secondary_stress = solution["X-averaged negative secondary particle surface tangential stress [Pa]"].entries
 
@@ -184,4 +198,24 @@ plt.title("Individual Volumetric Interfacial Current Densities (Negative Electro
 plt.legend()
 
 plt.tight_layout()
-plt.show()
+plt.show()'''
+
+#lithium particle concentration over particle radius
+'''
+rNPs=solution["R-averaged negative primary particle concentration [mol.m-3]"].entries[-1,:]
+rNSs=solution["R-averaged negative secondary particle concentration [mol.m-3]"].entries[-1,:]
+rNPc=solution["R-averaged negative primary particle concentration [mol.m-3]"].entries[0,:]
+rNSc=solution["R-averaged negative secondary particle concentration [mol.m-3]"].entries[0,:]
+plt.figure(figsize=(10, 6))
+plt.plot(t, rNPs, label="Li Conc in Primary particle(separator)")
+plt.plot(t, rNSs, label="Li Conc in secondary particle(separator)")
+plt.plot(t, rNPc, label="Li Conc in Primary particle(cc)")
+plt.plot(t, rNSc, label="Li Conc in secondary particle(cc)")
+plt.xlabel("Time [s]",fontsize=14)
+plt.ylabel("Average Li conc in particle",fontsize=14)
+plt.title("R-averaged Li conc. in negative particles",fontsize=16)
+plt.legend()
+plt.savefig("R-averaged particle concentration",dpi=1200)
+plt.tight_layout()
+plt.show()'''
+
