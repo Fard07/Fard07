@@ -17,7 +17,7 @@ pybamm.set_logging_level("INFO")
 SMALL_SIZE = 20
 MEDIUM_SIZE = 24
 BIGGER_SIZE = 26
-plt.rcParams["font.family"]    = "Times New Roman"
+plt.rcParams["font.family"] = "Times New Roman"
 plt.rcParams['axes.facecolor'] = 'none'
 plt.rcParams['axes.edgecolor'] = 'black'
 plt.rc('font', size=MEDIUM_SIZE)
@@ -28,8 +28,8 @@ plt.rc('ytick', labelsize=MEDIUM_SIZE)
 plt.rc('legend', fontsize=SMALL_SIZE)
 plt.rc('figure', titlesize=BIGGER_SIZE)
 
-#======================%%%  File path   %%%========================
-out_dir = r"E:\MTP project\Results\porousAnodeResult\16.7.25\contour_30%soc"
+# ======================%%%  File path   %%%========================
+out_dir = r"E:\MTP project\Results\porousAnodeResult\16.7.25\contour"
 os.makedirs(out_dir, exist_ok=True)
 
 # ─── Build model & parameters ─────────────────────────
@@ -54,6 +54,14 @@ parameter_values.update({
     "Primary: Initial concentration in negative electrode [mol.m-3]": 23000,
     "Secondary: Initial concentration in negative electrode [mol.m-3]": 277000,
     "Secondary: Maximum concentration in negative electrode [mol.m-3]": 278000,
+    # final updated parameter for BoL&EoL
+    "Positive electrode LAM constant proportional term [s-1]": 1.7778e-07,
+    "Primary: Negative electrode LAM constant proportional term [s-1]": 5.8778e-06,
+    "Secondary: Negative electrode LAM constant proportional term [s-1]": 2.8778e-07,
+    "Primary: Outer SEI solvent diffusivity [m2.s-1]": 2.5e-24,
+    "Secondary: Outer SEI solvent diffusivity [m2.s-1]": 9.5e-22,
+    "Secondary: Negative electrode partial molar volume [m3.mol-1]": 1.20e-05,
+    "Positive electrode partial molar volume [m3.mol-1]": 1.2e-06,
 
 }, check_already_exists=False)
 
@@ -63,14 +71,14 @@ c_rates = [0.5, 1, 2]
 # Containers to collect results
 all_X, all_Y, all_por = [], [], []
 
-
 for C in c_rates:
     # ─── Experiment for this C-rate ─────────────────────────
     exp = pybamm.Experiment([
-        (f"Discharge at {C}C until 2.5V",
-        "Charge at 0.3C for 3600 seconds (3 minute period)",
-         ),
-    ] * 2)
+                                (f"Discharge at {C}C until 2.5V",
+                                 "Charge at 0.3C until 4.2V (3 minute period)",
+                                 "Hold at 4.2V until C/100 (3 minute period)",
+                                 ),
+                            ] * 2)
 
     sim = pybamm.Simulation(
         model,
@@ -85,33 +93,33 @@ for C in c_rates:
     cycle2 = sol.cycles[1]
 
     # ─── Extract raw data ─────────────────────────
-    t_full  = cycle2["Time [h]"].entries
-    I_full  = cycle2["Current [A]"].entries
+    t_full = cycle2["Time [h]"].entries
+    I_full = cycle2["Current [A]"].entries
     Dc_full = cycle2["Discharge capacity [A.h]"].entries
     por_full = cycle2["Negative electrode porosity"].data
     N_cap = parameter_values["Nominal cell capacity [A.h]"]
     Dc_full_max = np.max(Dc_full)
 
-    soc = ((1 - Dc_full / Dc_full_max ) *30)
-    #soc_2 = np.where(I_full > 0, soc, -soc)
+    soc = ((1 - Dc_full / Dc_full_max) * 100)
+    # soc_2 = np.where(I_full > 0, soc, -soc)
     soc_d = soc[I_full > 0]
     soc_c = soc[I_full < 0]
-    
-   # ─── Separate Charge and Discharge Data ─────────────────────────
+
+    # ─── Separate Charge and Discharge Data ─────────────────────────
     # Discharge data (current > 0)
     t_discharge = t_full[I_full > 0]
     I_discharge = I_full[I_full > 0]
     Dc_discharge = Dc_full[I_full > 0]
-    por_discharge = por_full[: , I_full > 0]
-    #soc_discharge = soc_d[I_full > 0]
+    por_discharge = por_full[:, I_full > 0]
+    # soc_discharge = soc_d[I_full > 0]
 
     # Charge data (current < 0) - Note that the hold phase also has current close to 0
     # You might need to refine the condition for "charge" if the hold phase needs to be explicitly excluded
     t_charge = t_full[I_full < 0]
     I_charge = I_full[I_full < 0]
     Dc_charge = Dc_full[I_full < 0]
-    por_charge = por_full[: , I_full < 0]
-    #soc_charge = soc_2[I_full < 0]
+    por_charge = por_full[:, I_full < 0]
+    # soc_charge = soc_2[I_full < 0]
 
     # ─── Meshgrids ─────────────────────────
     # You can create separate meshgrids for discharge and charge if needed
@@ -121,32 +129,30 @@ for C in c_rates:
     all_X.append((C, Xd_discharge, Yd_discharge, por_discharge))
     all_Y.append((C, Xd_charge, Yd_charge, por_charge))
 
-#====================&&&&&&&&&&&&&&&&&&&&& Plotting discharge data  &&&&&&&&&&&&&&&&&&&&&&&&===============
-
+# Plotting discharge data
 for C, Xd_discharge, Yd_discharge, por_discharge in all_X:
     fig, ax = plt.subplots(figsize=(10, 6))
     cp = ax.contourf(
         Xd_discharge, Yd_discharge, por_discharge.T,
-        levels=1000, cmap="plasma", antialiased=False,
+        levels=1000, cmap="plasma_r", antialiased=False,
         linewidths=0, edgecolors="none"
     )
-    cbar = fig.colorbar(cp, label="Porosity")
-    cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.5f'))
-    ax.set_title(f"Discharge @ {C} C")
+    fig.colorbar(cp, label="Porosity")
+    ax.set_title(f"{C}C Discharge")
     ax.set_xlabel("$x_n$")
-    ax.set_ylabel("SOC [%]")
+    ax.set_ylabel("SoC [%]")
 
-    #ax.set_yticks([0, 20, 40, 60, 80, 100])
+    # ax.set_yticks([0, 20, 40, 60, 80, 100])
     plt.annotate(
         'Current collector', color='white',
-        xy=(0.12, 0.8), xycoords='figure fraction',
+        xy=(0.14, 0.8), xycoords='figure fraction',
         xytext=(0.22, 0.8), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
     plt.annotate(
         'Separator', color='white',
-        xy=(0.74, 0.8), xycoords='figure fraction',
+        xy=(0.73, 0.8), xycoords='figure fraction',
         xytext=(0.53, 0.8), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
@@ -158,33 +164,30 @@ for C, Xd_discharge, Yd_discharge, por_discharge in all_X:
     plt.close(fig)
     plt.show()
 
-# +++++++++++++++++++$$$$$$$$$$$$$    Plotting charge data    $$$$$$$$$$$$$$++++++++++++++++++++++++++++++++++++++++
-
-
+# Plotting charge data
 for C, Xd_charge, Yd_charge, por_charge in all_Y:
     fig, ax = plt.subplots(figsize=(10, 6))
     cp = ax.contourf(
         Xd_charge, Yd_charge, por_charge.T,
-        levels=1000, cmap="plasma", antialiased=False,
+        levels=1000, cmap="plasma_r", antialiased=False,
         linewidths=0, edgecolors="none"
     )
-    cbar = fig.colorbar(cp, label="Porosity")
-    cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.5f'))
-    ax.set_title(f"Charge 0.3C  [Discharged {C} C]")
+    fig.colorbar(cp, label="Porosity")
+    ax.set_title(f"0.3C Charge [Discharged {C} C]")
     ax.set_xlabel("$x_n$")
-    ax.set_ylabel("SOC [%]")
+    ax.set_ylabel("SoC [%]")
     # ax.set_ylim(0, 100)
     # ax.set_yticks([0, 20, 40, 60, 80, 100])
     plt.annotate(
         'Current collector', color='white',
-        xy=(0.12, 0.8), xycoords='figure fraction',
+        xy=(0.14, 0.8), xycoords='figure fraction',
         xytext=(0.22, 0.8), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
     plt.annotate(
         'Separator', color='white',
-        xy=(0.74, 0.8), xycoords='figure fraction',
+        xy=(0.73, 0.8), xycoords='figure fraction',
         xytext=(0.53, 0.8), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
@@ -196,9 +199,8 @@ for C, Xd_charge, Yd_charge, por_charge in all_Y:
     plt.close(fig)
     plt.show()
 
-
-#$$$$$$$$$$$$$$$$$$$$$$$$$$$%%%%%%%%%%%%%%%%%%%%%%%%%%%%%$$$$$$$$$$$$$$$$$$$$$$$$$$%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-#@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$%%%%%%%%%%%%%%%%%%%%%%%%%%%%%$$$$$$$$$$$$$$$$$$$$$$$$$$%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 # ─── Silicon fractions to sweep ─────────────────────────--------------------------------------------------------------
 
@@ -209,13 +211,15 @@ for si in si_fracs:
 
 
     parameter_values.update({
+        # *** Replace these keys with the exact names from your parameter set! ***
         "Primary: Negative electrode active material volume fraction": 0.75 - si,
         "Secondary: Negative electrode active material volume fraction": si,
     }, check_already_exists=False)
 
     exp = pybamm.Experiment([
         ("Discharge at 1C until 2.5V",
-        "Charge at 0.3C for 3600 seconds (3 minute period)",
+        "Charge at 0.3C until 4.2V (3 minute period)",
+        "Hold at 4.2V until C/100 (3 minute period)",
         ),
     ] * 2)
 
@@ -241,7 +245,7 @@ for si in si_fracs:
     por2_dis = por2[I2 > 0]
     por2_cha = por2[I2 < 0]
 
-    soc_si = ((1 - Dc2 / d_cap_max) * 30)
+    soc_si = ((1 - Dc2 / d_cap_max) * 100)
     soc_si_dis = soc_si[I2 > 0]
     soc_si_cha = soc_si[I2 < 0]
 
@@ -260,27 +264,26 @@ for si, Xc, Yc, por2_cha in results_cha:
     fig, ax = plt.subplots(figsize=(10, 6))
     cp = ax.contourf(
         Xc, Yc, por2_cha,
-        levels=1000, cmap="plasma", antialiased=False,
+        levels=1000, cmap="plasma_r", antialiased=False,
         linewidths=0, edgecolors="none"
     )
-    cbar = fig.colorbar(cp, label="Porosity")
-    cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.5f'))
+    fig.colorbar(cp, label="Porosity")
     sip = si / 0.75 * 100
     ax.set_title(f"1C Discharge — Si {sip:.1f}%")
     ax.set_xlabel("$x_n$")
-    ax.set_ylabel("SOC [%]")
+    ax.set_ylabel("SoC [%]")
 
     # annotations
     ax.annotate(
         'Current collector', color='white',
-        xy=(0.12, 0.8), xycoords='figure fraction',
+        xy=(0.14, 0.8), xycoords='figure fraction',
         xytext=(0.22, 0.8), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
     ax.annotate(
         'Separator', color='white',
-        xy=(0.74, 0.8), xycoords='figure fraction',
+        xy=(0.73, 0.8), xycoords='figure fraction',
         xytext=(0.53, 0.8), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
@@ -301,27 +304,26 @@ for si, Xd, Yd, por2_dis in results_dis:
     fig, ax = plt.subplots(figsize=(10, 6))
     cp = ax.contourf(
         Xd, Yd, por2_dis,
-        levels=1000, cmap="plasma", antialiased=False,
+        levels=1000, cmap="plasma_r", antialiased=False,
         linewidths=0, edgecolors="none"
     )
-    cbar = fig.colorbar(cp, label="Porosity")
-    cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.5f'))
+    fig.colorbar(cp, label="Porosity")
     sip = si / 0.75 * 100
     ax.set_title(f"0.3C Charge — Si {sip:.1f}%")
     ax.set_xlabel("$x_n$")
-    ax.set_ylabel("SOC [%]")
+    ax.set_ylabel("SoC [%]")
 
     # annotations
     ax.annotate(
         'Current collector', color='white',
-        xy=(0.12, 0.8), xycoords='figure fraction',
+        xy=(0.14, 0.8), xycoords='figure fraction',
         xytext=(0.22, 0.8), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
     ax.annotate(
         'Separator', color='white',
-        xy=(0.74, 0.8), xycoords='figure fraction',
+        xy=(0.73, 0.8), xycoords='figure fraction',
         xytext=(0.53, 0.8), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
