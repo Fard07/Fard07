@@ -9,6 +9,8 @@ import matplotlib.patches as mpatches
 from matplotlib.pyplot import figure
 from sympy.abc import alpha
 from matplotlib.ticker import FormatStrFormatter
+from scipy.interpolate import interp1d
+from matplotlib.lines import Line2D
 
 # ─── Styling ─────────────────────────
 style.use('ggplot')
@@ -32,7 +34,7 @@ plt.rc('figure', titlesize=BIGGER_SIZE)
 out_dir = r"E:\MTP project\Results\porousAnodeResult\16.7.25\contour"
 os.makedirs(out_dir, exist_ok=True)
 
-# ─── Build model & parameters ─────────────────────────
+# ─── Build model & parameters ─────────────────��───────
 model = pybamm.lithium_ion.DFN({
     "particle phases": ("2", "1"),
     "open-circuit potential": (("single", "current sigmoid"), "single"),
@@ -129,15 +131,27 @@ for C in c_rates:
     all_X.append((C, Xd_discharge, Yd_discharge, por_discharge))
     all_Y.append((C, Xd_charge, Yd_charge, por_charge))
 
+#####################------------------ Plotting discharge data------------------##########################
 # Plotting discharge data
-for C, Xd_discharge, Yd_discharge, por_discharge in all_X:
+
+'''for C, Xd_discharge, Yd_discharge, por_discharge in all_X:
     fig, ax = plt.subplots(figsize=(10, 6))
     cp = ax.contourf(
         Xd_discharge, Yd_discharge, por_discharge.T,
         levels=1000, cmap="plasma_r", antialiased=False,
         linewidths=0, edgecolors="none"
     )
-    fig.colorbar(cp, label="Porosity")
+    cbar = fig.colorbar(cp, label="Porosity")
+    # Get colorbar axis limits
+    cbar_ylim = cbar.ax.get_ylim()
+    num_ticks = 8  # adjust as desired
+    new_ticks = np.linspace(cbar_ylim[0], cbar_ylim[1], num=num_ticks)
+    cbar.ax.set_yticks(new_ticks)
+    # Set tick labels descending from high (bottom) to low (top)
+    cbar.ax.set_yticklabels([f"{t:.5f}" for t in np.linspace(cp.norm.vmax, cp.norm.vmin, num=num_ticks)])
+    cbar.ax.invert_yaxis()
+    cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.5f'))
+
     ax.set_title(f"{C}C Discharge")
     ax.set_xlabel("$x_n$")
     ax.set_ylabel("SoC [%]")
@@ -145,15 +159,15 @@ for C, Xd_discharge, Yd_discharge, por_discharge in all_X:
     # ax.set_yticks([0, 20, 40, 60, 80, 100])
     plt.annotate(
         'Current collector', color='white',
-        xy=(0.14, 0.8), xycoords='figure fraction',
-        xytext=(0.22, 0.8), textcoords='figure fraction',
+        xy=(0.14, 0.25), xycoords='figure fraction',
+        xytext=(0.22, 0.25), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
     plt.annotate(
         'Separator', color='white',
-        xy=(0.73, 0.8), xycoords='figure fraction',
-        xytext=(0.53, 0.8), textcoords='figure fraction',
+        xy=(0.74, 0.25), xycoords='figure fraction',
+        xytext=(0.53, 0.25), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
@@ -164,7 +178,8 @@ for C, Xd_discharge, Yd_discharge, por_discharge in all_X:
     plt.close(fig)
     plt.show()
 
-# Plotting charge data
+#########################################--------- Plotting charge data ---------#############################
+
 for C, Xd_charge, Yd_charge, por_charge in all_Y:
     fig, ax = plt.subplots(figsize=(10, 6))
     cp = ax.contourf(
@@ -172,23 +187,31 @@ for C, Xd_charge, Yd_charge, por_charge in all_Y:
         levels=1000, cmap="plasma_r", antialiased=False,
         linewidths=0, edgecolors="none"
     )
-    fig.colorbar(cp, label="Porosity")
+    cbar = fig.colorbar(cp, label="Porosity")
+    # Get colorbar axis limits
+    cbar_ylim = cbar.ax.get_ylim()
+    num_ticks = 8  # adjust as desired
+    new_ticks = np.linspace(cbar_ylim[0], cbar_ylim[1], num=num_ticks)
+    cbar.ax.set_yticks(new_ticks)
+    # Set tick labels descending from high (bottom) to low (top)
+    cbar.ax.set_yticklabels([f"{t:.5f}" for t in np.linspace(cp.norm.vmax, cp.norm.vmin, num=num_ticks)])
+    cbar.ax.invert_yaxis()
+    cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.5f'))
+
     ax.set_title(f"0.3C Charge [Discharged {C} C]")
     ax.set_xlabel("$x_n$")
     ax.set_ylabel("SoC [%]")
-    # ax.set_ylim(0, 100)
-    # ax.set_yticks([0, 20, 40, 60, 80, 100])
     plt.annotate(
         'Current collector', color='white',
-        xy=(0.14, 0.8), xycoords='figure fraction',
-        xytext=(0.22, 0.8), textcoords='figure fraction',
+        xy=(0.14, 0.25), xycoords='figure fraction',
+        xytext=(0.22, 0.25), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
     plt.annotate(
         'Separator', color='white',
-        xy=(0.73, 0.8), xycoords='figure fraction',
-        xytext=(0.53, 0.8), textcoords='figure fraction',
+        xy=(0.74, 0.25), xycoords='figure fraction',
+        xytext=(0.53, 0.25), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
@@ -197,7 +220,83 @@ for C, Xd_charge, Yd_charge, por_charge in all_Y:
     fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
     fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
     plt.close(fig)
-    plt.show()
+    plt.show()'''
+
+############## ==================     %%%%     Porosity vs X- w.r.t SoC     %%%%%    =======================############
+# =======================================-----------------------------------------=======================================
+
+
+c_colors = {
+    0.5: "midnightblue",
+    2:   "teal",
+}
+
+fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+for idx, (C, Xd_discharge, Yd_discharge, por_discharge) in enumerate(all_X):
+    if C not in [0.5, 2]:
+        continue  # Skip 1C
+
+    soc_d = Yd_discharge[:, 0]
+    por_interp = interp1d(soc_d, por_discharge.T, axis=0, bounds_error=False, fill_value="extrapolate")
+
+    Pdis85 = por_interp(85)
+    Pdis90 = por_interp(90)
+    Pdis95 = por_interp(95)
+
+    ax.plot(xn, Pdis85, '-',  lw=3, color=c_colors[C])
+    ax.plot(xn, Pdis90, '--', lw=3, color=c_colors[C])
+    ax.plot(xn, Pdis95, ':',  lw=3, color=c_colors[C])
+
+# C-rate legend (only 0.5C and 2C)
+c_rate_legend = [
+    Line2D([0], [0], color='midnightblue', marker='s',markersize=12,lw=3, linestyle='None',  label='0.5C'),
+    Line2D([0], [0], color='teal',   marker='s',markersize=12,  lw=3, linestyle='None',  label='2C'),
+]
+
+# SoC legend: colors for each SoC
+soc_legend = [
+    Line2D([0], [0], color='black', lw=3, linestyle='-', label='SoC 85%'),
+    Line2D([0], [0], color='black',  lw=3, linestyle='--', label='SoC 90%'),
+    Line2D([0], [0], color='black',  lw=3, linestyle=':', label='SoC 95%')
+]
+
+# Place the legends
+first_legend = ax.legend(handles=c_rate_legend, loc="lower right", frameon=False,fontsize=SMALL_SIZE)
+ax.add_artist(first_legend)
+second_legend = ax.legend(handles=soc_legend, loc="lower left", frameon=False, fontsize=SMALL_SIZE)
+
+ax.set_xlabel("$x_n$")
+ax.set_ylabel("Porosity")
+ax.set_ylim(0.24936, 0.24970)
+yticks = np.linspace(0.24940, 0.24965, 5)
+ax.set_yticks(yticks)
+ax.yaxis.set_major_formatter(FormatStrFormatter('%.5f'))
+ax.fill_betweenx([0.24936, 0.249655], 0, 1, color="seashell", alpha=1)
+
+plt.annotate(
+    'Current collector', color='black',
+    xy=(0.268, 0.86), xycoords='figure fraction',
+    xytext=(0.36, 0.86), textcoords='figure fraction',
+    arrowprops=dict(facecolor="black", width=3, headwidth=8),
+    va='center', fontsize=20
+)
+plt.annotate(
+    'Separator', color='black',
+    xy=(0.91, 0.86), xycoords='figure fraction',
+    xytext=(0.672, 0.86), textcoords='figure fraction',
+    arrowprops=dict(facecolor="black", width=3, headwidth=8),
+    va='center', fontsize=20
+)
+plt.tight_layout()
+fname = "porosity_vs_xn_SoC"
+fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+plt.show()
+
+
+
+
+
 
 # $$$$$$$$$$$$$$$$$$$$$$$$$$$%%%%%%%%%%%%%%%%%%%%%%%%%%%%%$$$$$$$$$$$$$$$$$$$$$$$$$$%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
@@ -214,6 +313,20 @@ for si in si_fracs:
         # *** Replace these keys with the exact names from your parameter set! ***
         "Primary: Negative electrode active material volume fraction": 0.75 - si,
         "Secondary: Negative electrode active material volume fraction": si,
+        "Lithium plating transfer coefficient": 0.5,
+        "Dead lithium decay constant [s-1]": 1e-4,
+        "Primary: Maximum concentration in negative electrode [mol.m-3]": 28700,
+        "Primary: Initial concentration in negative electrode [mol.m-3]": 23000,
+        "Secondary: Initial concentration in negative electrode [mol.m-3]": 277000,
+        "Secondary: Maximum concentration in negative electrode [mol.m-3]": 278000,
+        # final updated parameter for BoL&EoL
+        "Positive electrode LAM constant proportional term [s-1]": 1.7778e-07,
+        "Primary: Negative electrode LAM constant proportional term [s-1]": 5.8778e-06,
+        "Secondary: Negative electrode LAM constant proportional term [s-1]": 2.8778e-07,
+        "Primary: Outer SEI solvent diffusivity [m2.s-1]": 2.5e-24,
+        "Secondary: Outer SEI solvent diffusivity [m2.s-1]": 9.5e-22,
+        "Secondary: Negative electrode partial molar volume [m3.mol-1]": 1.20e-05,
+        "Positive electrode partial molar volume [m3.mol-1]": 1.2e-06,
     }, check_already_exists=False)
 
     exp = pybamm.Experiment([
@@ -260,14 +373,23 @@ for si in si_fracs:
 #=============================$$$$$$$$$$$$$$$$$$$$$$$$$===================================
 # ─── Plot & save Charge contours ─────────────────────────
 
-for si, Xc, Yc, por2_cha in results_cha:
+'''for si, Xc, Yc, por2_cha in results_cha:
     fig, ax = plt.subplots(figsize=(10, 6))
     cp = ax.contourf(
         Xc, Yc, por2_cha,
         levels=1000, cmap="plasma_r", antialiased=False,
         linewidths=0, edgecolors="none"
     )
-    fig.colorbar(cp, label="Porosity")
+    cbar = fig.colorbar(cp, label="Porosity")
+    # Get colorbar axis limits
+    cbar_ylim = cbar.ax.get_ylim()
+    num_ticks = 8  # adjust as desired
+    new_ticks = np.linspace(cbar_ylim[0], cbar_ylim[1], num=num_ticks)
+    cbar.ax.set_yticks(new_ticks)
+    # Set tick labels descending from high (bottom) to low (top)
+    cbar.ax.set_yticklabels([f"{t:.5f}" for t in np.linspace(cp.norm.vmax, cp.norm.vmin, num=num_ticks)])
+    cbar.ax.invert_yaxis()
+    cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.5f'))
     sip = si / 0.75 * 100
     ax.set_title(f"1C Discharge — Si {sip:.1f}%")
     ax.set_xlabel("$x_n$")
@@ -276,15 +398,15 @@ for si, Xc, Yc, por2_cha in results_cha:
     # annotations
     ax.annotate(
         'Current collector', color='white',
-        xy=(0.14, 0.8), xycoords='figure fraction',
-        xytext=(0.22, 0.8), textcoords='figure fraction',
+        xy=(0.14, 0.25), xycoords='figure fraction',
+        xytext=(0.22, 0.25), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
     ax.annotate(
         'Separator', color='white',
-        xy=(0.73, 0.8), xycoords='figure fraction',
-        xytext=(0.53, 0.8), textcoords='figure fraction',
+        xy=(0.74, 0.25), xycoords='figure fraction',
+        xytext=(0.53, 0.25), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
@@ -307,7 +429,16 @@ for si, Xd, Yd, por2_dis in results_dis:
         levels=1000, cmap="plasma_r", antialiased=False,
         linewidths=0, edgecolors="none"
     )
-    fig.colorbar(cp, label="Porosity")
+    cbar = fig.colorbar(cp, label="Porosity")
+    # Get colorbar axis limits
+    cbar_ylim = cbar.ax.get_ylim()
+    num_ticks = 8  # adjust as desired
+    new_ticks = np.linspace(cbar_ylim[0], cbar_ylim[1], num=num_ticks)
+    cbar.ax.set_yticks(new_ticks)
+    # Set tick labels descending from high (bottom) to low (top)
+    cbar.ax.set_yticklabels([f"{t:.5f}" for t in np.linspace(cp.norm.vmax, cp.norm.vmin, num=num_ticks)])
+    cbar.ax.invert_yaxis()
+    cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.5f'))
     sip = si / 0.75 * 100
     ax.set_title(f"0.3C Charge — Si {sip:.1f}%")
     ax.set_xlabel("$x_n$")
@@ -316,15 +447,15 @@ for si, Xd, Yd, por2_dis in results_dis:
     # annotations
     ax.annotate(
         'Current collector', color='white',
-        xy=(0.14, 0.8), xycoords='figure fraction',
-        xytext=(0.22, 0.8), textcoords='figure fraction',
+        xy=(0.14, 0.25), xycoords='figure fraction',
+        xytext=(0.22, 0.25), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
     ax.annotate(
         'Separator', color='white',
-        xy=(0.73, 0.8), xycoords='figure fraction',
-        xytext=(0.53, 0.8), textcoords='figure fraction',
+        xy=(0.74, 0.25), xycoords='figure fraction',
+        xytext=(0.53, 0.25), textcoords='figure fraction',
         arrowprops=dict(facecolor="white", width=3, headwidth=8),
         va='center', fontsize=20
     )
@@ -336,4 +467,89 @@ for si, Xd, Yd, por2_dis in results_dis:
     fig.savefig(os.path.join(out_dir, filename_base + ".png"), dpi=1200)
     fig.savefig(os.path.join(out_dir, filename_base + ".svg"), dpi=1200)
     plt.close(fig)
-    plt.show()
+    plt.show()'''
+
+#==========================================Porosity vs Xn for Si fractions=========================================
+# ─── Plotting porosity vs Xn for different Si fractions at specific SoC
+
+si_colors = {
+    0.015: "midnightblue",  # 2% Si
+    0.075: "teal",       # 10% Si
+}
+
+fig, ax = plt.subplots(figsize=(8, 6))
+
+for si, Xd, Yd, por2_dis in results_dis:
+    if si not in [0.015, 0.075]:
+        continue
+
+    soc_si_dis = Yd[:, 0]
+    try:
+        por_interp = interp1d(soc_si_dis, por2_dis, axis=0, bounds_error=False, fill_value="extrapolate")
+    except Exception as e:
+        print(f"Interpolation error for Si {si*100:.1f}%: {e}")
+        continue
+
+    try:
+        Pdis85 = por_interp(85)
+        Pdis90 = por_interp(90)
+        Pdis95 = por_interp(95)
+    except Exception as e:
+        print(f"Error evaluating interpolation for Si {si*100:.1f}%: {e}")
+        continue
+
+    ax.plot(Xd[0], Pdis85, '-',  lw=3, color=si_colors[si])
+    ax.plot(Xd[0], Pdis90, '--', lw=3, color=si_colors[si])
+    ax.plot(Xd[0], Pdis95, ':',  lw=3, color=si_colors[si])
+
+# Legends for silicon fraction
+si_legend = [
+    Line2D([0], [0], color='royalblue', marker='s', lw=3, linestyle='None', label='2% Si'),
+    Line2D([0], [0], color='teal', marker='s', lw=3, linestyle='None', label='10% Si'),
+]
+
+# Legends for SoC
+soc_legend = [
+    Line2D([0], [0], color='black', linestyle='-',  lw=3, label='SoC 85%'),
+    Line2D([0], [0], color='black', linestyle='--', lw=3, label='SoC 90%'),
+    Line2D([0], [0], color='black', linestyle=':',  lw=3, label='SoC 95%')
+]
+
+# Add legends to the plot
+first_legend = ax.legend(handles=si_legend, loc='lower right', frameon=False, fontsize=SMALL_SIZE,
+    bbox_to_anchor=(1, 0.1))
+ax.add_artist(first_legend)
+second_legend = ax.legend(handles=soc_legend, loc="lower left", frameon=False, fontsize=SMALL_SIZE,
+    bbox_to_anchor=(0.0, 0.1))
+
+ax.set_xlabel("$x_n$")
+ax.set_ylabel("Porosity")
+
+ax.set_ylim(0.2491, 0.2498)
+yticks = np.linspace(0.24915, 0.24967, 5)
+ax.set_yticks(yticks)
+ax.yaxis.set_major_formatter(FormatStrFormatter('%.5f'))
+
+# Highlight region
+ax.fill_betweenx([0.2491, 0.2497], 0, 1, color="seashell", alpha=1)
+
+# Annotations
+plt.annotate(
+    'Current collector', color='black',
+    xy=(0.262, 0.86), xycoords='figure fraction',
+    xytext=(0.36, 0.86), textcoords='figure fraction',
+    arrowprops=dict(facecolor="black", width=3, headwidth=8),
+    va='center', fontsize=20
+)
+plt.annotate(
+    'Separator', color='black',
+    xy=(0.91, 0.86), xycoords='figure fraction',
+    xytext=(0.672, 0.86), textcoords='figure fraction',
+    arrowprops=dict(facecolor="black", width=3, headwidth=8),
+    va='center', fontsize=20
+)
+
+plt.tight_layout()
+fig.savefig(os.path.join(out_dir, "Si_frac_porosity_lineplot_discharge.png"), dpi=1200)
+fig.savefig(os.path.join(out_dir, "Si_frac_porosity_lineplot_discharge.svg"), dpi=1200)
+plt.show()
