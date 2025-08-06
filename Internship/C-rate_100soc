@@ -138,7 +138,7 @@ ax.text(mid/2, y0 + y_max*0.01, "Discharge",
 ax.annotate("", xy=(mid, y0), xytext=(10, y0),
             arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
             annotation_clip=False)
-ax.text(mid + (10-mid)/2, y0 + y_max*0.01, "Charge 0.3C",
+ax.text(mid + (10-mid)/2, y0 + y_max*0.01, "0.3C Charge cc-cv",
         ha="center", va="bottom", fontsize=MEDIUM_SIZE)
 # axis formatting
 ax.spines["bottom"].set_position(("data", 0))
@@ -147,6 +147,9 @@ ax.set_xlabel("Throughput Capacity [A·h]")
 ax.set_ylabel("Volume change [%]")
 #ax.set_xlim(-0.05*per_cycle, 1.1*per_cycle)
 ax.set_ylim(0, 124*3)
+yticks = np.linspace(0, 320, 5)
+ax.set_yticks(yticks)
+ax.set_xticks([0, 2.5, 5, 7.5, 10])
 # legend (no empty string!)
 leg = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
 for text in leg.get_texts():
@@ -165,7 +168,7 @@ ax.plot(tp_list[1], si_pct_list[1], "--", lw=3, label="1C", color="royalblue")
 ax.plot(tp_list[2], si_pct_list[2], ":", lw=3, label="2C", color="cornflowerblue")  # correct label here
 
 y_max = 3.2e-6
-mid = 4.8  # you had hardcoded 5.6; better to use mid = per_cycle/2
+mid = 4.9  # you had hardcoded 5.6; better to use mid = per_cycle/2
 y0 = y_max
 
 # shading
@@ -182,7 +185,7 @@ ax.text(mid / 2, 3.22e-6, "Discharge",
 ax.annotate("", xy=(mid, y0), xytext=(10, y0),
             arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
             annotation_clip=False)
-ax.text(mid + (10 - mid) / 2, 3.22e-6 , "Charge",
+ax.text(mid + (10 - mid) / 2, 3.22e-6 , "0.3C Charge cc-cv",
         ha="center", va="bottom", fontsize=MEDIUM_SIZE)
 
 # axis formatting
@@ -192,6 +195,7 @@ ax.set_xlabel("Throughput Capacity [A·h]")
 ax.set_ylabel("Radius [m]")
 # ax.set_xlim(-0.05*per_cycle, 1.1*per_cycle)
 ax.set_ylim(1.5e-6, 2e-6 + Rs)
+ax.set_xticks([0, 2.5, 5, 7.5, 10])
 
 # legend (no empty string!)
 leg = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
@@ -216,7 +220,7 @@ for i in range(3):  # for indices 0, 1, 2
 
     # Y-axis scaling parameters
     y_max = 3.2e-6
-    mid = 4.8  # midpoint for discharge/charge split
+    mid = np.max(dis_cap[i])  # midpoint for discharge/charge split
     y0 = y_max
     x_length = np.max(tp_list[i])
 
@@ -228,14 +232,14 @@ for i in range(3):  # for indices 0, 1, 2
     ax.annotate("", xy=(0, y0), xytext=(mid, y0),
                 arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
                 annotation_clip=False)
-    ax.text(mid / 2, 3.22e-6, f"Discharge {c_rates[i]}C",
+    ax.text(mid / 2, 3.22e-6, f"{c_rates[i]}C Discharge",
             ha="center", va="bottom", fontsize=MEDIUM_SIZE)
 
     # Charge arrow
     ax.annotate("", xy=(mid, y0), xytext=(x_length, y0),
                 arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
                 annotation_clip=False)
-    ax.text(mid + (10 - mid) / 2, 3.22e-6, "Charge 0.3C",
+    ax.text(mid + (10 - mid) / 2, 3.22e-6, "0.3C Charge cc-cv",
             ha="center", va="bottom", fontsize=MEDIUM_SIZE)
 
     # Axis formatting
@@ -287,7 +291,7 @@ ax.text(mid/2, y0 + 0.03, "Discharge", ha="center", va="bottom", fontsize=MEDIUM
 ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
             arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
             annotation_clip=False)
-ax.text(mid + (per_cycle - mid)/2, y0 + 0.03, "0.3C Charge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+ax.text(mid + (per_cycle - mid)/2, y0 + 0.03, "0.3C Charge cc-cv", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
 
 # Axis labels and limits
 ax.spines["bottom"].set_position(("data", 0))
@@ -318,7 +322,7 @@ ax.plot(tp_list[1], gr_pct_list[1], lw=3, linestyle="--", color="teal", label="1
 ax.plot(tp_list[2], gr_pct_list[2], lw=3, linestyle=":", color="darkgreen", label="2C")
 
 # Parameters
-mid = 4.8
+mid = 4.9
 per_cycle = 9.9
 y_max = 6.025e-6
 y0 = y_max + 0.0007e-6  # placement of arrows
@@ -337,7 +341,7 @@ ax.text(mid/2, y0 + 0.001e-6, "Discharge", ha="center", va="bottom", fontsize=ME
 ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
             arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
             annotation_clip=False)
-ax.text(mid + (per_cycle - mid)/2, y0 + 0.001e-6, "0.3C Charge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+ax.text(mid + (per_cycle - mid)/2, y0 + 0.001e-6, "0.3C Charge cc-cv", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
 
 # Axis labels and limits
 ax.spines["bottom"].set_position(("data", 5.85e-6))
@@ -369,7 +373,7 @@ for i in range(3):  # for indices 0, 1, 2
     ax.plot(tp_list[i], cc_Gr[i], ":", lw=3, label="CC", color="darkgreen")
 
     # Parameters
-    mid = 4.8
+    mid = np.max(dis_cap[i])
     per_cycle = np.max(tp_list[i])
     y_max = 6.03e-6
     y0 = y_max + 0.0007e-6  # placement of arrows
@@ -388,7 +392,7 @@ for i in range(3):  # for indices 0, 1, 2
     ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
                 arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
                 annotation_clip=False)
-    ax.text(mid + (per_cycle - mid) / 2, y0 + 0.001e-6, "0.3C Charge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+    ax.text(mid + (per_cycle - mid) / 2, y0 + 0.001e-6, "0.3C Charge cc-cv", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
 
     # Axis labels and limits
     ax.spines["bottom"].set_position(("data", 5.85e-6))
@@ -413,7 +417,7 @@ for i in range(3):  # for indices 0, 1, 2
 
 # -----------------------------X-averaged Porosity in different Si%-------------------------
 per_cycle = 9.9
-mid=4.8
+mid=4.9
 
 fig, ax = plt.subplots(figsize=(8, 6))
 ax.plot(tp_list[0],X_Por[0],linestyle="-", lw=3, label="0.5C", color="midnightblue")
@@ -425,6 +429,7 @@ ax.fill_betweenx([0, 0.25], mid, per_cycle, color="lavender", alpha=1)
 ax.set_ylim(0.2478, 0.2503)
 ax.set_xlim(-0.05 * per_cycle, 1.05 * per_cycle)
 ax.set_xlabel("Throughput Capacity [A·h]")
+ax.set_xticks([0, 2.5, 5, 7.5, 10])
 ax.set_ylabel("Porosity")
 ax.spines["bottom"].set_position(("data", 0.2478))
 ax.xaxis.set_ticks_position("bottom")
@@ -432,7 +437,7 @@ y0 = 0.250025
 ax.annotate("", xy=(0, y0), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
 ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
 ax.text(mid/2, 0.2501, "Discharge", ha="center", fontsize=MEDIUM_SIZE)
-ax.text(mid + (per_cycle - mid)/2, 0.2501, "0.3C Charge", ha="center", fontsize=MEDIUM_SIZE)
+ax.text(mid + (per_cycle - mid)/2, 0.2501, "0.3C Charge cc-cv", ha="center", fontsize=MEDIUM_SIZE)
 
 first_legend = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
 ax.add_artist(first_legend)  # Add the first legend as an artist
@@ -449,7 +454,7 @@ plt.show()
 c_rates = [0.5, 1, 2]
 for i in range(3):  # for indices 0, 1, 2
     fig, ax = plt.subplots(figsize=(8, 6))
-    mid = 4.8
+    mid = 4.9
     per_cycle = np.max(tp_list[i])
 
     # Plot Si surface displacement curves
@@ -462,6 +467,7 @@ for i in range(3):  # for indices 0, 1, 2
     ax.set_ylim(0.2478, 0.2503)
     ax.set_xlim(-0.05 * per_cycle, 1.05 * per_cycle)
     ax.set_xlabel("Throughput Capacity [A·h]")
+    ax.set_xticks([0, 2.5, 5, 7.5, 10])
     ax.set_ylabel("Porosity")
     ax.spines["bottom"].set_position(("data", 0.2478))
     ax.xaxis.set_ticks_position("bottom")
@@ -469,7 +475,7 @@ for i in range(3):  # for indices 0, 1, 2
     ax.annotate("", xy=(0, y0), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
     ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
     ax.text(mid/2, 0.2501, f"{c_rates[i]}C Discharge", ha="center", fontsize=MEDIUM_SIZE)
-    ax.text(mid + (per_cycle - mid)/2, 0.2501, "0.3C Charge", ha="center", fontsize=MEDIUM_SIZE)
+    ax.text(mid + (per_cycle - mid)/2, 0.2501, "0.3C Charge cc-cv", ha="center", fontsize=MEDIUM_SIZE)
 
     first_legend = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
     ax.add_artist(first_legend)  # Add the first legend as an artist
@@ -479,4 +485,6 @@ for i in range(3):  # for indices 0, 1, 2
     fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
     fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
     plt.close(fig)
+
+
 
