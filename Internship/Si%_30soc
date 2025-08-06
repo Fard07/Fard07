@@ -1,0 +1,455 @@
+import os
+import matplotlib.pyplot as plt
+import numpy as np
+import pybamm
+from matplotlib import style
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+
+# ─── Styling ─────────────────────────
+style.use('ggplot')
+pybamm.set_logging_level("INFO")
+
+SMALL_SIZE, MEDIUM_SIZE, BIGGER_SIZE = 20, 24, 26
+plt.rcParams["font.family"]      = "Times New Roman"
+plt.rcParams['axes.facecolor']   = 'none'
+plt.rcParams['axes.edgecolor']   = 'black'
+plt.rc('font', size=MEDIUM_SIZE)
+plt.rc('axes', titlesize=MEDIUM_SIZE)
+plt.rc('axes', labelsize=MEDIUM_SIZE)
+plt.rc('xtick', labelsize=MEDIUM_SIZE)
+plt.rc('ytick', labelsize=MEDIUM_SIZE)
+plt.rc('legend', fontsize=SMALL_SIZE)
+plt.rc('figure', titlesize=BIGGER_SIZE)
+
+#location of the results saved
+out_dir = r"E:\MTP project\Results\porousAnodeResult\16.7.25\BOL-Si_30%soc"
+os.makedirs(out_dir, exist_ok=True)
+
+# Parameters
+Si_vol_fracs = [0.015, 0.075]  # Secondary (Si)
+total_AM_frac = 0.75                          # Total active material
+
+discharge_C_rate = 1.0
+model = pybamm.lithium_ion.DFN({
+    "particle phases": ("2", "1"),
+    "open-circuit potential": (("single", "current sigmoid"), "single"),
+    "particle mechanics": ("swelling only", "none"),
+    "loss of active material": ("stress-driven", "none"),
+    "SEI": "solvent-diffusion limited",
+    "SEI porosity change": "true",
+    "particle": "Fickian diffusion",
+    "cell geometry": "arbitrary",
+    "lithium plating": "partially reversible",
+    "lithium plating porosity change": "true",
+})
+
+parameter_values = pybamm.ParameterValues("Chen2020_composite")
+
+parameter_values.update({
+    "Lithium plating transfer coefficient": 0.5,
+    "Dead lithium decay constant [s-1]": 1e-4,
+    "Primary: Maximum concentration in negative electrode [mol.m-3]": 28700,
+    "Primary: Initial concentration in negative electrode [mol.m-3]": 23000,
+    "Secondary: Initial concentration in negative electrode [mol.m-3]": 277000,
+    "Secondary: Maximum concentration in negative electrode [mol.m-3]": 278000,
+    # final updated parameter for BoL&EoL
+    "Positive electrode LAM constant proportional term [s-1]": 1.7778e-07,
+    "Primary: Negative electrode LAM constant proportional term [s-1]": 1.7778e-06,
+    "Secondary: Negative electrode LAM constant proportional term [s-1]": 1.5778e-07,
+    "Primary: Outer SEI solvent diffusivity [m2.s-1]": 2.5e-24,
+    "Secondary: Outer SEI solvent diffusivity [m2.s-1]": 9.5e-22,
+    "Secondary: Negative electrode partial molar volume [m3.mol-1]": 1.20e-05,
+    "Positive electrode partial molar volume [m3.mol-1]": 1.2e-06,
+}, check_already_exists=False)
+
+# Prepare storage for plotting
+cc_Si, s_Si, cc_Gr, s_Gr, X_Gr, X_Si, X_Por, cc_Por, s_Por, D_cap = [], [], [], [], [], [], [], [], [], []
+tp_list = []
+disp_Si_list, disp_Gr_list = [],[]
+v_Si_list, v_Gr_list = [], []
+for eps_s in Si_vol_fracs:
+    eps_p = total_AM_frac - eps_s
+
+
+    parameter_values.update({
+        "Secondary: Negative electrode active material volume fraction": eps_s,
+        "Primary: Negative electrode active material volume fraction": eps_p,
+    }, check_already_exists=False)
+
+    experiment = pybamm.Experiment([
+        ("Discharge at 1C until 2.5V",
+         "Charge at 0.3C for 3600 seconds (3 minute period)",
+         )
+    ] * 2)
+
+    sim = pybamm.Simulation(
+        model, experiment=experiment, parameter_values=parameter_values,
+        solver=pybamm.IDAKLUSolver(),
+        discretisation_kwargs={"remove_independent_variables_from_rhs": True},
+    )
+    sol = sim.solve(calc_esoh=False)
+    cyc_2 = sol.cycles[1]
+
+    tcap = cyc_2["Throughput capacity [A.h]"].entries
+    I = cyc_2["Current [A]"].entries
+
+    Rp = parameter_values["Primary: Negative particle radius [m]"]
+    Rs = parameter_values["Secondary: Negative particle radius [m]"]
+    disp_Si = cyc_2["X-averaged negative secondary particle surface displacement [m]"].entries
+    disp_Gr = cyc_2["X-averaged negative primary particle surface displacement [m]"].entries
+    disp_Si_list.append(disp_Si + Rs)
+    disp_Gr_list.append(disp_Gr + Rp)
+    VSi_per = 3* disp_Si/ Rs * 100
+    #VSi_per = cyc_2["Negative secondary particle surface radial stress [Pa]"].entries
+    VGr_per = 3* disp_Gr / Rp * 100
+    cc_Si.append((cyc_2["Negative secondary particle surface displacement [m]"].entries[0, :] + Rs))
+    s_Si.append((cyc_2["Negative secondary particle surface displacement [m]"].entries[-1, :] + Rs))
+    cc_Gr.append((cyc_2["Negative primary particle surface displacement [m]"].entries[0, :] + Rp) )
+    s_Gr.append((cyc_2["Negative primary particle surface displacement [m]"].entries[-1, :] + Rp) )
+    X_Gr.append(cyc_2["X-averaged negative primary particle surface displacement [m]"].entries + Rp)
+    X_Si.append((cyc_2["X-averaged negative secondary particle surface displacement [m]"].entries + Rs))
+    X_Por.append(cyc_2["X-averaged negative electrode porosity"].entries)
+    cc_Por.append(cyc_2["Negative electrode porosity"].entries[0,:])
+    s_Por.append(cyc_2["Negative electrode porosity"].entries[-1,:])
+    D_cap.append(cyc_2["Discharge capacity [A.h]"].entries)
+    tp_list.append(tcap)
+    v_Si_list.append(VSi_per)
+    v_Gr_list.append(VGr_per)
+
+
+#============================$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$=====================================
+#--------------------- %%% Volume change of Silicon in percentage %%%------------------
+
+fig, ax = plt.subplots(figsize=(7.5, 6))
+ax.plot(tp_list[0],v_Si_list[0],linestyle="-", lw=3, label="2% Si", color="midnightblue")
+#ax.plot(tp_list[1],v_Si_list[1],linestyle="--", lw=3, label="5%", color="royalblue")
+ax.plot(tp_list[1],v_Si_list[1],linestyle="--", lw=3, label="10% Si", color="royalblue")  # correct label here
+mid = np.max(D_cap[1])  # you had hardcoded 5.6; better to use mid = per_cycle/2
+per_cycle = np.max(tp_list[1])
+#ax.fill_betweenx([0, 2*110], 0, per_cycle, color="seashell", alpha=1)
+#ax.fill_betweenx([0, 2*110], mid, per_cycle, color="lavender", alpha=1)
+ax.set_ylim(0, 123*2)
+ax.set_xlim(-0.05 * per_cycle, 1.05 * per_cycle)
+ax.set_xlabel("Throughput Capacity [A·h]")
+ax.set_ylabel("Volume change [%]")
+ax.spines["bottom"].set_position(("data", 0))
+ax.xaxis.set_ticks_position("bottom")
+y0 = 112*2
+#ax.annotate("", xy=(0, y0), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
+#ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
+ax.text(mid/2, y0 + 3, "0.3C Charging", ha="center", fontsize=MEDIUM_SIZE)
+ax.text(mid + (per_cycle - mid)/2, y0 + 3, "1C Discharge", ha="center", fontsize=MEDIUM_SIZE)
+first_legend = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
+ax.add_artist(first_legend)  # Add the first legend as an artist
+
+plt.tight_layout()
+fname = "Avg Si Vol vary si%"
+#fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+#fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+plt.show()
+
+#=====================================$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$======================================
+#------------------------------%%%%%%%     Radius change for silicon   %%%%%%%%%%%%%%%%-------------------------------#
+'''
+fig, ax = plt.subplots(figsize=(7.5, 6))
+ax.plot(tp_list[0], disp_Si_list[0], "-", lw=3, label="2%", color="midnightblue")
+#ax.plot(tp_list[1], disp_Si_list[1], "--", lw=3, label="5%", color="royalblue")
+ax.plot(tp_list[1], disp_Si_list[1], "--", lw=3, label="10%", color="royalblue")  # correct label here
+
+y_max = 2.6e-6
+mid = np.max(D_cap[1])  # you had hardcoded 5.6; better to use mid = per_cycle/2
+y0 = y_max
+per_cycle = np.max(tp_list[1])
+# shading
+#ax.fill_betweenx([-0.1, y_max], 0, per_cycle, color="seashell", alpha=1)
+#ax.fill_betweenx([-0.1, y_max], mid, 10, color="lavender", alpha=1)
+# discharge arrow
+#ax.annotate("", xy=(0, y0), xytext=(mid, y0),arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),annotation_clip=False)
+ax.text(mid / 2, 2.61e-6, "1C Discharge",
+        ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+# charge arrow
+#ax.annotate("", xy=(mid, y0), xytext=(10, y0),arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),annotation_clip=False)
+ax.text(mid + (per_cycle - mid) / 1.7, 2.61e-6 , "0.3C Charge cc-cv",
+        ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+# axis formatting
+ax.spines["bottom"].set_position(("data", 1.5e-6))
+ax.xaxis.set_ticks_position("bottom")
+ax.set_xlabel("Throughput Capacity [A·h]")
+ax.set_ylabel("Radius [m]")
+# ax.set_xlim(-0.05*13, 1.1*13)
+ax.set_ylim(1.5e-6, 2.75e-6)
+
+# legend (no empty string!)
+leg = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
+for text in leg.get_texts():
+    text.set_color("black")
+
+plt.tight_layout()
+fname = "Avg Si radii vary si%"
+fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+plt.show()
+
+
+# ---------- Radiius of SILICON (Si) current collector\ average \ seperator ----------
+
+si = [0.015, 0.075]
+si_per = [2, 10]
+for i in range(2):  # for indices 0, 1, 2
+    fig, ax = plt.subplots(figsize=(7.5, 6))
+
+    # Plot Si surface displacement curves
+    ax.plot(tp_list[i], disp_Si_list[i], "-", lw=3, label=f"Avg {si_per[i]}%", color="midnightblue")
+    ax.plot(tp_list[i], s_Si[i], "--", lw=3, label="Sep", color="royalblue")
+    ax.plot(tp_list[i], cc_Si[i], ":", lw=3, label="CC", color="cornflowerblue")
+
+    # Y-axis scaling parameters
+    y_max =2.6e-6
+    mid = np.max(D_cap[i])
+    per_cycle = np.max(tp_list[i])
+    y0 = y_max
+
+    # Shaded regions for discharge and charge
+    ax.fill_betweenx([-0.1, y_max], 0, mid, color="linen", alpha=1)
+    ax.fill_betweenx([-0.1, y_max], mid, per_cycle, color="lavender", alpha=1)
+
+    # Discharge arrow
+    ax.annotate("", xy=(0, y0), xytext=(mid, y0),
+                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
+                annotation_clip=False)
+    ax.text(mid / 2, 2.61e-6, "1C Discharge",
+            ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+    # Charge arrow
+    ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
+                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
+                annotation_clip=False)
+    ax.text(mid + (per_cycle - mid) / 2, 2.61e-6, "0.3C Charge cc-cv", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+    # Axis formatting
+    ax.spines["bottom"].set_position(("data", 1.5e-6))
+    ax.xaxis.set_ticks_position("bottom")
+    ax.set_xlabel("Throughput Capacity [A·h]")
+    ax.set_ylabel("Radius [m]")
+    ax.set_ylim(1.5e-6, 2.75e-6)  # Ensure Rs is defined earlier
+
+    # Legend formatting
+    leg = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
+    for text in leg.get_texts():
+        text.set_color("black")
+
+    plt.tight_layout()
+    fname = f"Spatial Si Radii with {si_per[i]}%"
+    fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+    fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+    plt.show()
+
+#===================================$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$======================================
+
+# ---------- PLOT GRAPHITE (Gr) volume change during discharging and charging ----------
+
+fig, ax = plt.subplots(figsize=(7.5, 6))
+ax.plot(tp_list[0], v_Gr_list[0], lw=3, linestyle="-", color="navy", label="2% Si")
+#ax.plot(tp_list[1], v_Gr_list[1], lw=3, linestyle="--", color="teal", label="5% Si")
+ax.plot(tp_list[1], v_Gr_list[1], lw=3, linestyle="--", color="darkgreen", label="10% Si")
+mid = np.max(D_cap[1])  # you had hardcoded 5.6; better to use mid = per_cycle/2
+per_cycle = np.max(tp_list[1])
+y_max = 2.3
+y0 = y_max + 0.01  # placement of arrows
+# Fill regions
+#ax.fill_betweenx([0, y_max], 0, mid, color="linen", alpha=1)
+#ax.fill_betweenx([0, y_max], mid, per_cycle, color="lavender", alpha=1)
+
+# Annotations for Discharge
+#ax.annotate("", xy=(0, y0), xytext=(mid, y0),arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),annotation_clip=False)
+ax.text(mid/2, y0 + 0.01, "1C Discharge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+# Annotations for Charge
+#ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),annotation_clip=False)
+ax.text(mid + (per_cycle - mid)/2, y0 + 0.01, "0.3C Charge cc-cv", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+# Axis labels and limits
+ax.spines["bottom"].set_position(("data", 0))
+ax.xaxis.set_ticks_position("bottom")
+ax.set_xlabel("Throughput Capacity [A.h]")
+ax.set_ylabel("Volume change [%]")
+ax.set_xlim(-0.05 * per_cycle, 1.055 * per_cycle)
+ax.set_ylim(0, 2.7)
+#ax.set_yticks([0, 2, 4, 6, 8])
+
+# Legend
+leg = ax.legend(loc="lower right", frameon=False, fontsize=SMALL_SIZE)
+for text in leg.get_texts():
+    text.set_color("black")
+
+plt.tight_layout()
+fname = "Avg Gr Vol vary si%"
+fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+plt.show()
+
+#=================================== Graphite particle absolute Radius  ==============================
+
+fig, ax = plt.subplots(figsize=(7.5, 6))
+# Plot graphite curves with updated linewidths and labels
+ax.plot(tp_list[0], disp_Gr_list[0], lw=3, linestyle="-", color="navy", label="2%")
+#ax.plot(tp_list[1], disp_Gr_list[1], lw=3, linestyle="--", color="teal", label="5%")
+ax.plot(tp_list[1], disp_Gr_list[1], lw=3, linestyle="--", color="darkgreen", label="10%")
+
+# Parameters
+mid = np.max(D_cap[1])  # you had hardcoded 5.6; better to use mid = per_cycle/2
+per_cycle = np.max(tp_list[1])
+y_max = 5.905e-6
+y0 = 5.9055e-6 # placement of arrows
+
+# Fill regions
+#ax.fill_betweenx([0, y_max], 0, per_cycle, color="linen", alpha=1)
+#ax.fill_betweenx([0, y_max], mid, per_cycle, color="lavender", alpha=1)
+
+# Annotations for Discharge
+#ax.annotate("", xy=(0, y0), xytext=(mid, y0),arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),annotation_clip=False)
+ax.text(mid/2, y0 + 0.001e-6, "1C Discharge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+# Annotations for Charge
+#ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),annotation_clip=False)
+ax.text(mid + (per_cycle - mid)/2, y0 + 0.001e-6, "0.3C Charge cc-cv", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+# Axis labels and limits
+ax.spines["bottom"].set_position(("data", 5.855e-6))
+ax.xaxis.set_ticks_position("bottom")
+ax.set_xlabel("Throughput Capacity [A.h]")
+ax.set_ylabel("Radius [m]")
+ax.set_xlim(-0.05 * per_cycle, 1.055 * per_cycle)
+ax.set_ylim(5.855e-6, 5.915e-6)
+
+# Legend
+first_legend = ax.legend(loc="lower right", frameon=False, fontsize=SMALL_SIZE)
+ax.add_artist(first_legend)  # Add the first legend as an artist
+
+plt.tight_layout()
+fname = "Avg Gr radii vary si%"
+fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+plt.show()
+
+
+#%%%%%%%%%%%%%%%%%%%%  Seperator\average \current collector side Graphite particle  %%%%%%%%%%%%%%%%%%%%%%%%%-
+
+si_per = [2, 5, 10]
+for i in range(3):  # for indices 0, 1, 2
+    fig, ax = plt.subplots(figsize=(7.5, 6))
+
+    # Plot Si surface displacement curves
+    ax.plot(tp_list[i], disp_Gr_list[i], "-", lw=3, label=f"Avg {si_per[i]}%", color="navy")
+    ax.plot(tp_list[i], s_Gr[i], "--", lw=3, label="Sep", color="teal")
+    ax.plot(tp_list[i], cc_Gr[i], ":", lw=3, label="CC", color="darkgreen")
+
+    # Parameters
+    mid = np.max(D_cap[i])
+    per_cycle = np.max(tp_list[i])
+    y_max = 5.91e-6
+    y0 = y_max + 0.0007e-6  # placement of arrows
+
+    # Fill regions
+    ax.fill_betweenx([0, y_max], 0, mid, color="linen", alpha=1)
+    ax.fill_betweenx([0, y_max], mid, per_cycle, color="lavender", alpha=1)
+
+    # Annotations for Discharge
+    ax.annotate("", xy=(0, y0), xytext=(mid, y0),
+                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
+                annotation_clip=False)
+    ax.text(mid / 2, y0 + 0.001e-6, "1C Discharge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+    # Annotations for Charge
+    ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
+                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
+                annotation_clip=False)
+    ax.text(mid + (per_cycle - mid) / 2, y0 + 0.001e-6, "0.3C Charge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+    # Axis labels and limits
+    ax.spines["bottom"].set_position(("data", 5.86e-6))
+    ax.xaxis.set_ticks_position("bottom")
+    ax.set_xlabel("Throughput Capacity [A.h]")
+    ax.set_ylabel("Radius [m]")
+    ax.set_xlim(-0.05 * per_cycle, 1.055 * per_cycle)
+    ax.set_ylim(5.86e-6, 5.92e-6)
+    # Legend
+    first_legend = ax.legend(loc="lower right", frameon=False, fontsize=SMALL_SIZE)
+    ax.add_artist(first_legend)  # Add the first legend as an artist
+    plt.tight_layout()
+    fname = f"Spatial Gr radii with {si_per[i]}%"
+    fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+    fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+    plt.show()
+
+#==============================$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$======================================
+#===================Porosity=================Porosity===================Porosity===============Porosity============
+
+#-----------------------------X-averaged Porosity in different Si%-------------------------
+
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.plot(tp_list[0],X_Por[0],linestyle="-", lw=3, label="2%", color="midnightblue")
+#ax.plot(tp_list[1],X_Por[1],linestyle="--", lw=3, label="5%", color="royalblue")
+ax.plot(tp_list[1],X_Por[1],linestyle=":", lw=3, label="10%", color="royalblue")
+per_cycle = np.max(tp_list[1])
+#ax.fill_betweenx([0, 0.25], 0, mid, color="linen", alpha=1)
+#ax.fill_betweenx([0.2496, 0.24997], 0, per_cycle, color="seashell", alpha=1)
+ax.set_ylim(0.2498, 0.250)
+ax.set_xlim(-0.05 * per_cycle, 1.05 * per_cycle)
+ax.set_xlabel("Throughput Capacity [A·h]")
+ax.set_ylabel("Porosity")
+ax.spines["bottom"].set_position(("data", 0.2498))
+ax.xaxis.set_ticks_position("bottom")
+y0 = 0.2497
+#ax.annotate("", xy=(0, y0), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
+#ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
+ax.text(mid / 2, 0.249975, "1C Discharge", ha="center", fontsize=MEDIUM_SIZE)
+ax.text(mid + (per_cycle - mid) / 2, 0.249975, "0.3C Charge cc-cv", ha="center", fontsize=MEDIUM_SIZE)
+
+first_legend = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
+ax.add_artist(first_legend)
+plt.tight_layout()
+fname = "Avg Por vary si%"
+fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+plt.show()
+
+#-------------------X-averaged \ current collector \ seperator side porosity evolution ----------------------#
+
+si = [0.015, 0.0375, 0.075]
+si_p = [2, 5, 10]
+for i in range(3):  # for indices 0, 1, 2
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Plot Si surface displacement curves
+    ax.plot(tp_list[i], X_Por[i], "-", lw=3, label=f"Avg {si_p[i]}%", color="midnightblue")
+    ax.plot(tp_list[i], s_Por[i], "--", lw=3, label="Sep", color="royalblue")
+    ax.plot(tp_list[i], cc_Por[i], ":", lw=3, label="CC", color="cornflowerblue")
+    per_cycle= np.max(tp_list[i])
+    mid = np.max(D_cap[i])
+    ax.fill_betweenx([0, 0.24997], 0, mid, color="linen", alpha=1)
+    ax.fill_betweenx([0, 0.24997], mid, per_cycle, color="lavender", alpha=1)
+    ax.set_ylim(0.24975, 0.25001)
+    ax.set_xlim(-0.05 * per_cycle, 1.05 * per_cycle)
+    ax.set_xlabel("Throughput Capacity [A·h]")
+    ax.set_ylabel("Porosity")
+    ax.spines["bottom"].set_position(("data", 0.24975))
+    ax.xaxis.set_ticks_position("bottom")
+    y0 = 0.249972
+    ax.annotate("", xy=(0, y0), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
+    ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
+                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
+    ax.text(mid / 2, 0.249975, "1C Discharge", ha="center", fontsize=MEDIUM_SIZE)
+    ax.text(mid + (per_cycle - mid) / 2, 0.249975, "0.3C Charge", ha="center", fontsize=MEDIUM_SIZE)
+
+    first_legend = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
+    ax.add_artist(first_legend)
+
+    plt.tight_layout()
+    fname = f"Spatial Por with {si_p[i]}%"
+    fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
+    fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+    plt.show()
+    '''
