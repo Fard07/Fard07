@@ -1,0 +1,359 @@
+# zebra_nicl2_thermal_pybamm.py
+import math
+import numpy as np
+import pybamm as pb
+
+
+class ZebraNiThermalModel:
+    """
+    PyBaMM model for Na–NiCl2 (ZEBRA) cell with segmented cathode and thermal heat generation.
+    - NiCl2 only (EOCV_Ni = 2.58 V)
+    - Constant-current operation (charge/discharge)
+    - Segmented cathode BV kinetics; a scaling algebraic variable enforces total current match
+    - Bruggeman ionic conductivity; Ni electronic conductivity
+    - Aggregated ohmic losses (separator + ionic + electronic)
+    - Lumped thermal model (C_th, hA, T_env)
+    Based on: Büttner et al., Batteries 2023, 9, 200; Orchard & Weaving (1993)
+    """
+
+    def __init__(self, N_segments=50, evolving_porosity=False):
+        self.N = int(N_segments)
+        self.evolving_porosity = evolving_porosity
+        self.model = pb.BaseModel(name="Na–NiCl2 segmented + thermal (Ni-only)")
+        self._build_parameters()
+        self._build_variables()
+        self._build_equations()
+        self._build_outputs()
+
+    # --------------------------
+    # Parameters (defaults reflect paper Table 3 where available)
+    # --------------------------
+    def _build_parameters(self):
+        m = self.model
+        # Constants
+        F = pb.Parameter("Faraday constant [C/mol]")           # 96485
+        R = pb.Parameter("Gas constant [J/mol/K]")             # 8.314
+        z = pb.Scalar(2.0)                                     # NiCl2: 2e-
+        T0 = pb.Parameter("Initial temperature [K]")           # 573.15 K (~300°C)
+        alpha = pb.Parameter("Charge transfer coefficient [-]")# ~0.5
+
+        # Electrochemistry (Ni-only)
+        EOCV_Ni = pb.Parameter("EOCV_Ni [V]")                 # 2.58
+        dE_dT = pb.Parameter("dEOCV/dT [V/K]")                # 2.16e-4 V/K (assumed Ni=Fe per paper)
+        j0_ref = pb.Parameter("j0_ref_Ni [A/cm3]")            # ~0.14 A/cm^3
+        # Anode linearized BV (small overpotential)
+        j0_a = pb.Parameter("Anode j0 [A/cm2]")               # area-based for linear BV; adjust as needed
+        A_anode = pb.Parameter("Anode exchange area [cm2]")   # set ~ cathode area
+
+        # Geometry (cylindrical cathode)
+        hK = pb.Parameter("Cathode height hK [cm]")           # ~21 cm
+        rK = pb.Parameter("Cathode radius rK [cm]")           # ~1.8 cm
+        A_cs = pb.Scalar(math.pi) * rK ** 2                    # cross-section area
+        A_side = pb.Scalar(2 * math.pi) * rK * hK             # side area
+        A_cathode = A_side                                    # interface area for exchange (approx.)
+        V_cathode = A_cs * hK
+
+        # Separator ohmic resistance (lumped)
+        R_sep = pb.Parameter("Separator resistance [Ohm]")
+
+        # Conductivities (temperature-dependent)
+        # Ni electronic: sigma ~ 1 / rho(T), rho_Ni(T) from Neelakanta (1995)
+        def sigma_ni_fn(T):
+            # rho_Ni(20 C) = 6.24e-6 Ohm*cm, with linear temp coeff 0.0069 per °C
+            rho = 6.24e-6 * (1.0 + 0.0069 * (T - (20.0 + 273.15)))
+            return 1.0 / rho
+
+        sigma_Ni = pb.FunctionParameter("sigma_Ni(T) [1/Ohm/cm]", sigma_ni_fn)
+
+        # Ionic conductivity: Christin (2015) via mB(T)
+        def kappa_bulk_fn(T):
+            mB = 0.5436 - 1.972e-4 * T + 2.346e-7 * T ** 2
+            return 0.145 - 1.827 * mB + (-0.5715 + 6.358 * mB) * 1e-3 * T
+
+        kappa_bulk = pb.FunctionParameter("kappa_bulk(T) [1/Ohm/cm]", kappa_bulk_fn)
+        tau = pb.Parameter("Tortuosity exponent tau [-]")     # Bruggeman (1+tau)
+
+        # Cathode structure
+        eps0 = pb.Parameter("Initial cathode porosity [-]")   # e.g., 0.5
+        eps_metal0 = pb.Parameter("Initial metal fraction [-]")# e.g., 0.25
+        porosity_coeff = pb.Parameter("Porosity slope [-]")   # 0 disables, else small value (e.g., 0.2)
+
+        # Thermal lumped
+        C_th = pb.Parameter("Thermal capacitance [J/K]")      # lumped
+        hA = pb.Parameter("hA [W/K]")                         # convection (h*A_surface)
+        T_env = pb.Parameter("Ambient temperature [K]")
+
+        # Inputs
+        I = pb.InputParameter("Current [A]")                  # applied current (sign: + charge, - discharge)
+
+        # Store
+        m.parameters = {
+            "F": F, "R": R, "z": z, "T0": T0, "alpha": alpha,
+            "EOCV_Ni": EOCV_Ni, "dE_dT": dE_dT, "j0_ref": j0_ref,
+            "j0_a": j0_a, "A_anode": A_anode,
+            "hK": hK, "rK": rK, "A_cs": A_cs, "A_side": A_side, "A_cathode": A_cathode,
+            "V_cathode": V_cathode, "R_sep": R_sep,
+            "sigma_Ni": sigma_Ni, "kappa_bulk": kappa_bulk, "tau": tau, "eps0": eps0,
+            "eps_metal0": eps_metal0, "porosity_coeff": porosity_coeff,
+            "C_th": C_th, "hA": hA, "T_env": T_env,
+            "I": I,
+        }
+
+    # --------------------------
+    # Variables
+    # --------------------------
+    def _build_variables(self):
+        m = self.model
+        p = m.parameters
+
+        # State variables: NiCl2 fraction (segment-wise), Temperature
+        self.v_Ni = []
+        for n in range(self.N):
+            self.v_Ni.append(pb.Variable(f"NiCl2 fraction seg {n}", domain=[]))  # 0..1
+
+        # Cathode overpotential scaling (algebraic) to enforce current matching
+        self.eta_scale = pb.Variable("Cathode overpotential scale [V]", domain=[])
+
+        # Lumped temperature
+        T = pb.Variable("Temperature [K]", domain=[])
+        m.variables.update({
+            "Temperature [K]": T,
+        })
+
+        # Precompute per-segment geometric terms
+        # Divide height into N segments; each segment has same height ln and side exchange area An
+        ln = p["hK"] / self.N
+        An = pb.Scalar(2 * math.pi) * p["rK"] * ln
+        # segment volume
+        v_seg = p["A_cs"] * ln
+
+        # Weighting function for overpotential distribution (prefer segments near separator)
+        # w_n = availability * exp(-beta * n), availability = v_Ni
+        beta = pb.Parameter("Overpotential decay per segment [-]")  # e.g., 0.05
+        w_list = []
+        for n in range(self.N):
+            avail = self.v_Ni[n]
+            w_list.append(avail * pb.exp(-beta * n))
+        W_sum = w_list[0]
+        for n in range(1, self.N):
+            W_sum = W_sum + w_list[n]
+
+        # Per-segment overpotential and exchange current density
+        # eta_n = eta_scale * w_n / sum(w)
+        self.eta_n = []
+        self.j0_n = []
+        self.j_n = []
+        for n in range(self.N):
+            eta_n = self.eta_scale * w_list[n] / (W_sum + 1e-30)
+            self.eta_n.append(eta_n)
+            # Standard exchange current density (A/cm^3); simple DoD dependence can be added if needed
+            j0_n = p["j0_ref"]  # optionally multiply by (1 - DoD)^(2/3)
+            self.j0_n.append(j0_n)
+            # Butler–Volmer
+            bv = j0_n * (
+                pb.exp((1 - p["alpha"]) * p["z"] * p["F"] * eta_n / (p["R"] * T))
+                - pb.exp(-p["alpha"] * p["z"] * p["F"] * eta_n / (p["R"] * T))
+            )
+            self.j_n.append(bv)
+
+        # Ionic/electronic conductivities via Bruggeman (porosity constant by default)
+        # eps_n = eps0 - porosity_coeff * (1 - v_Ni); metal fraction ~ eps_metal0 + (1 - v_Ni) (rudimentary)
+        self.eps_n = []
+        self.kappa_n = []
+        self.sigma_e_n = []
+        for n in range(self.N):
+            if self.evolving_porosity:
+                eps_n = p["eps0"] - p["porosity_coeff"] * (1 - self.v_Ni[n])
+                eps_n = pb.maximum(eps_n, pb.Scalar(1e-3))
+            else:
+                eps_n = p["eps0"]
+            self.eps_n.append(eps_n)
+            kappa_eff = p["kappa_bulk"](T) * eps_n ** (1.0 + p["tau"])
+            self.kappa_n.append(kappa_eff)
+            sigma_e = p["sigma_Ni"](T) * p["eps_metal0"] ** (1.0 + p["tau"])
+            self.sigma_e_n.append(sigma_e)
+
+        # Aggregate ionic/electronic resistances (Ohm)
+        R_ion_total = pb.Scalar(0)
+        R_el_total = pb.Scalar(0)
+        for n in range(self.N):
+            R_ion_total = R_ion_total + ln / (self.kappa_n[n] * An + 1e-30)
+            R_el_total = R_el_total + ln / (self.sigma_e_n[n] * An + 1e-30)
+
+        m.variables.update({
+            "Segment height ln [cm]": ln,
+            "Segment area An [cm2]": An,
+            "Segment volume [cm3]": v_seg,
+            "Ionic resistance total [Ohm]": R_ion_total,
+            "Electronic resistance total [Ohm]": R_el_total,
+        })
+
+        # Total reaction current in A: sum(j_n * v_seg)
+        I_reaction = self.j_n[0] * v_seg
+        for n in range(1, self.N):
+            I_reaction = I_reaction + self.j_n[n] * v_seg
+
+        m.variables.update({
+            "Total reaction current [A]": I_reaction,
+        })
+
+        # Anode overpotential (linearized BV): ja = j0_a * zF eta_a / RT; current density ~ I/A_anode
+        j_anode = p["I"] / (p["A_anode"] + 1e-30)  # A/cm2
+        eta_a = j_anode * p["R"] * T / (p["z"] * p["F"] * p["j0_a"] + 1e-30)
+        m.variables.update({
+            "Anode overpotential [V]": eta_a,
+        })
+
+        # Effective cathode overpotential (reaction-weighted average)
+        eta_c_eff = self.eta_n[0] * self.j_n[0] * v_seg
+        j_sum = self.j_n[0] * v_seg
+        for n in range(1, self.N):
+            eta_c_eff = eta_c_eff + self.eta_n[n] * self.j_n[n] * v_seg
+            j_sum = j_sum + self.j_n[n] * v_seg
+        eta_c_eff = eta_c_eff / (j_sum + 1e-30)
+        m.variables.update({
+            "Cathode overpotential (effective) [V]": eta_c_eff,
+        })
+
+        # Cell voltage
+        E_cell = p["EOCV_Ni"] - eta_c_eff - eta_a - p["I"] * (p["R_sep"] + R_ion_total + R_el_total)
+        m.variables.update({
+            "Cell voltage [V]": E_cell,
+        })
+
+        # Heat generation terms (W)
+        # 1) Reversible (entropic): sum(j_n) * T * dE/dT * v_seg
+        Q_rev = self.j_n[0] * T * p["dE_dT"] * v_seg
+        for n in range(1, self.N):
+            Q_rev = Q_rev + self.j_n[n] * T * p["dE_dT"] * v_seg
+        # 2) Irreversible: sum(j_n * eta_n) * v_seg
+        Q_irr = self.j_n[0] * self.eta_n[0] * v_seg
+        for n in range(1, self.N):
+            Q_irr = Q_irr + self.j_n[n] * self.eta_n[n] * v_seg
+        # 3) Ohmic: I^2 * R_total
+        R_tot = p["R_sep"] + R_ion_total + R_el_total
+        Q_ohm = p["I"] * p["I"] * R_tot
+
+        Q_total = Q_rev + Q_irr + Q_ohm
+        m.variables.update({
+            "Heat reversible [W]": Q_rev,
+            "Heat irreversible [W]": Q_irr,
+            "Heat ohmic [W]": Q_ohm,
+            "Heat total [W]": Q_total,
+        })
+
+        # Store for RHS construction
+        self.ln = ln
+        self.An = An
+        self.v_seg = v_seg
+
+    # --------------------------
+    # Equations
+    # --------------------------
+    def _build_equations(self):
+        m = self.model
+        p = m.parameters
+        T = m.variables["Temperature [K]"]
+        Q_total = m.variables["Heat total [W]"]
+
+        # Algebraic condition: enforce total reaction current equals applied current magnitude
+        I = p["I"]
+        I_react = m.variables["Total reaction current [A]"]
+        # Sign consistency: BV j is positive for forward reaction when eta > 0; We allow eta_scale sign adjust via algebraic solve
+        m.algebraic[self.eta_scale] = I_react - I
+
+        # NiCl2 consumption ODE (per segment): dv/dt ~ - (j_n * v_seg) / (v_seg * j_scale)
+        # Use a simple conversion: dv_Ni/dt = - k_conv * j_n, k_conv chosen so dv goes from 1->0 over full capacity
+        # For a 41 Ah cell, total NiCl2 "capacity" maps to Q = sum over segments; here we scale by a parameter
+        k_conv = pb.Parameter("Conversion coefficient [cm3/A/s]")  # tune to match capacity vs current
+        for n in range(self.N):
+            # Limit to non-negative
+            m.rhs[self.v_Ni[n]] = -k_conv * self.j_n[n]
+            m.concatenated_initial_conditions = True  # allow per-variable ICs
+
+        # Thermal lumped ODE: C_th dT/dt = Q_total - hA (T - T_env)
+        m.rhs[T] = (Q_total - p["hA"] * (T - p["T_env"])) / p["C_th"]
+
+        # Initial conditions
+        for n in range(self.N):
+            m.initial_conditions[self.v_Ni[n]] = pb.Scalar(1.0)
+        m.initial_conditions[self.eta_scale] = pb.Scalar(0.0)
+        m.initial_conditions[T] = p["T0"]
+
+        # Events (stop when voltage reaches bounds or NiCl2 exhausted)
+        V = m.variables["Cell voltage [V]"]
+        # Typical limits (set as parameters if desired)
+        V_min = pb.Parameter("Cutoff voltage min [V]")  # e.g., 2.0
+        V_max = pb.Parameter("Cutoff voltage max [V]")  # e.g., 2.8
+        # voltage events
+        m.events.append(pb.Event("Voltage low", V - V_min))
+        m.events.append(pb.Event("Voltage high", V_max - V))
+        # Ni depletion event (any segment below small threshold)
+        for n in range(self.N):
+            m.events.append(pb.Event(f"NiCl2 depleted seg {n}", self.v_Ni[n] - 1e-3))
+
+    # --------------------------
+    # Outputs
+    # --------------------------
+    def _build_outputs(self):
+        m = self.model
+        # Keep as defined in variables
+        pass
+
+
+# ------------- Example usage -------------
+if __name__ == "__main__":
+    # Build model
+    model_builder = ZebraNiThermalModel(N_segments=50, evolving_porosity=False)
+    model = model_builder.model
+
+    # Set numeric parameters
+    param_values = pb.ParameterValues({
+        "Faraday constant [C/mol]": 96485.0,
+        "Gas constant [J/mol/K]": 8.314,
+        "Initial temperature [K]": 573.15,         # ~300°C
+        "Charge transfer coefficient [-]": 0.5,
+        "EOCV_Ni [V]": 2.58,
+        "dEOCV/dT [V/K]": 2.16e-4,
+        "j0_ref_Ni [A/cm3]": 0.14,                 # Büttner / Orchard
+        "Anode j0 [A/cm2]": 5.0,                   # Orchard
+        "Anode exchange area [cm2]": 2 * math.pi * 1.8 * 21.0,  # cathode side area
+        "Cathode height hK [cm]": 21.0,
+        "Cathode radius rK [cm]": 1.8,
+        "Separator resistance [Ohm]": 0.02,        # tune per cell
+        "Tortuosity exponent tau [-]": 0.5,        # Bruggeman (1+tau)
+        "Initial cathode porosity [-]": 0.5,
+        "Initial metal fraction [-]": 0.25,
+        "Porosity slope [-]": 0.0,                 # 0 disables evolution
+        "Thermal capacitance [J/K]": 1500.0,       # lumped; tune per pack/cell
+        "hA [W/K]": 5.0,                           # convection; tune
+        "Ambient temperature [K]": 573.15,         # assume isothermal environment
+        "Overpotential decay per segment [-]": 0.05,
+        "Conversion coefficient [cm3/A/s]": 1e-4,  # tune to match capacity
+        "Cutoff voltage min [V]": 2.0,
+        "Cutoff voltage max [V]": 2.8,
+    })
+
+    # Discharge at 1/8C for ~41 Ah cell -> I ≈ -5.125 A (negative for discharge)
+    I_discharge = -5.125
+
+    sim = pb.Simulation(
+        model,
+        parameter_values=param_values,
+        solver=pb.CasadiSolver(),  # DAE-friendly
+        inputs={"Current [A]": I_discharge},
+    )
+
+    # Run for 4 hours or until event
+    t_eval = np.linspace(0, 4 * 3600, 1201)
+    sol = sim.solve(t_eval)
+
+    # Example outputs
+    V = sol["Cell voltage [V]"]
+    T = sol["Temperature [K]"]
+    Q_total = sol["Heat total [W]"]
+
+    # Print last values
+    print(f"Final voltage: {V.data[-1]:.3f} V")
+    print(f"Final temperature: {T.data[-1]:.2f} K")
+    print(f"Final heat generation: {Q_total.data[-1]:.2f} W")
