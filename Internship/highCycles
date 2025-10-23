@@ -1,0 +1,166 @@
+import os
+import matplotlib.pyplot as plt
+import numpy as np
+import pybamm
+from matplotlib import style
+pybamm.settings.debug_mode=True
+# ─── Styling ─────────────────────────
+style.use('ggplot')
+pybamm.set_logging_level("INFO")
+
+SMALL_SIZE, MEDIUM_SIZE, BIGGER_SIZE = 20, 24, 26
+plt.rcParams["font.family"] = "Times New Roman"
+plt.rcParams['axes.facecolor'] = 'none'
+plt.rcParams['axes.edgecolor'] = 'black'
+plt.rc('font', size=MEDIUM_SIZE)
+plt.rc('axes', titlesize=MEDIUM_SIZE)
+plt.rc('axes', labelsize=MEDIUM_SIZE)
+plt.rc('xtick', labelsize=MEDIUM_SIZE)
+plt.rc('ytick', labelsize=MEDIUM_SIZE)
+plt.rc('legend', fontsize=SMALL_SIZE)
+plt.rc('figure', titlesize=BIGGER_SIZE)
+
+#out_dir = r"E:\MTP project\Results\porousAnodeResult\16.7.25\BOL-C-rates"
+#os.makedirs(out_dir, exist_ok=True)
+
+# ─── Build model & base parameters ───────────────
+model = pybamm.lithium_ion.DFN({
+    "particle phases": ("2", "1"),
+    "open-circuit potential": (("single", "current sigmoid"), "single"),
+    "particle mechanics": ("swelling only", "none"),
+    "loss of active material": ("stress-driven", "none"),
+    "SEI": "solvent-diffusion limited",
+    "SEI porosity change": "true",
+    "particle": "Fickian diffusion",
+    "cell geometry": "arbitrary",
+    "lithium plating": "partially reversible",
+    "lithium plating porosity change": "true",
+})
+parameter_values = pybamm.ParameterValues("Chen2020_composite")
+
+# ─── Use only 1C discharge & 100 cycles ──────────
+c_rate = 1.0   # discharge rate
+num_cycles = 600
+#tp_list, dis_cap = [], []
+si_pct_list = []
+gr_pct_list = []
+#Vsi_pct_list = []
+#Vgr_pct_list = []
+#disp_Si_list = []
+#disp_Gr_list = []
+#cc_Si, s_Si, cc_Gr, s_Gr, X_Por, cc_Por, s_Por = [], [], [], [], [], [], []
+
+parameter_values.update({
+    "Lithium plating transfer coefficient": 0.5,
+    "Dead lithium decay constant [s-1]": 1e-4,
+    "Primary: Maximum concentration in negative electrode [mol.m-3]": 28700,
+    "Primary: Initial concentration in negative electrode [mol.m-3]": 23000,
+    "Secondary: Initial concentration in negative electrode [mol.m-3]": 277000,
+    "Secondary: Maximum concentration in negative electrode [mol.m-3]": 278000,
+    # final updated parameter for BoL&EoL
+    "Positive electrode LAM constant proportional term [s-1]": 1.7778e-07,
+    #"Primary: Negative electrode LAM constant proportional term [s-1]": 5.8778e-06,
+    #"Secondary: Negative electrode LAM constant proportional term [s-1]": 2.8778e-07,
+    "Primary: Outer SEI solvent diffusivity [m2.s-1]": 2.5e-24,
+    #"Secondary: Outer SEI solvent diffusivity [m2.s-1]": 9.5e-22,
+    "Secondary: Negative electrode partial molar volume [m3.mol-1]": 1.20e-05,
+    "Positive electrode partial molar volume [m3.mol-1]": 1.2e-06,
+    #altering the parameters for the simulation
+    "Primary: Negative electrode LAM constant proportional term [s-1]": 1e-7,  # Reduced from 5.8778e-06
+    "Secondary: Negative electrode LAM constant proportional term [s-1]": 1e-8,  # Reduced from 2.8778e-07
+    "Secondary: Outer SEI solvent diffusivity [m2.s-1]": 5e-23,  # Reduced from 9.5e-22
+
+
+}, check_already_exists=False)
+
+# Define experiment (1C discharge, 100 cycles)
+experiment = pybamm.Experiment([
+    (
+        "Charge at 0.3C until 4.2V",
+        "Hold at 4.2V until C/100",
+        "Discharge at 1C until 2.5V",
+    )
+] * num_cycles)
+
+
+# ─── Run Simulation ───────────────────
+sim = pybamm.Simulation(
+    model,
+    experiment=experiment,
+    parameter_values=parameter_values,
+    solver=pybamm.IDAKLUSolver(
+
+    ),
+    discretisation_kwargs={"remove_independent_variables_from_rhs": True},
+)
+
+sol = sim.solve()
+
+# ─── Extract data for cycle  ───────────────
+cyc_1 = sol.cycles[1]
+cyc_2 = sol.cycles[499]
+t = cyc_2["Time [s]"].entries
+throughput = cyc_2["Throughput capacity [A.h]"].entries
+dis_cap2 = cyc_2["Discharge capacity [A.h]"].entries
+dis_cap1 = cyc_1["Discharge capacity [A.h]"].entries
+
+Rs = parameter_values["Secondary: Negative particle radius [m]"]
+Rp = parameter_values["Primary: Negative particle radius [m]"]
+disp_Si = cyc_2["X-averaged negative secondary particle surface displacement [m]"].entries + Rs
+disp_Gr = cyc_2["X-averaged negative primary particle surface displacement [m]"].entries + Rp
+cc_Si = (cyc_2["Negative secondary particle surface displacement [m]"].entries[0, :] + Rs)
+s_Si = (cyc_2["Negative secondary particle surface displacement [m]"].entries[-1, :] + Rs)
+cc_Gr = (cyc_2["Negative primary particle surface displacement [m]"].entries[0, :] + Rp)
+s_Gr = (cyc_2["Negative primary particle surface displacement [m]"].entries[-1, :] + Rp)
+X_Por = (cyc_2["X-averaged negative electrode porosity"].entries)
+cc_Por = (cyc_2["Negative electrode porosity"].entries[0, :])
+s_Por = (cyc_2["Negative electrode porosity"].entries[-1, :])
+
+# si_min = Rs.min()
+# gr_min = Rp.min()
+si_pct = disp_Si
+gr_pct = disp_Gr
+Vsi_pct = 3 * (disp_Si - Rs) / Rs * 100
+Vgr_pct = 3 * (disp_Gr - Rp) / Rp * 100
+
+'''fig, ax = plt.subplots(figsize=(8, 6))
+ax.plot(throughput, disp_Si, "-", lw=3, label="Avg", color="midnightblue")
+ax.plot(throughput, cc_Si, "--", lw=3, label="cc", color="royalblue")
+ax.plot(throughput, s_Si, ":", lw=3, label="Sep", color="cornflowerblue")
+ax.set_xlabel("Throughput capacity [A.h]")
+#ax.set_ylabel("Porosity")
+ax.set_ylabel("Si radius [m]")
+#ax.set_title("X-avg Negative electrode porosity")
+ax.set_title("Average Si Radius change vs Throughput")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.plot(throughput,X_Por, "-", lw=3, label="Avg", color="midnightblue")
+ax.plot(throughput,cc_Por, "--", lw=3, label="CC", color="royalblue")
+ax.plot(throughput,s_Por, ":", lw=3, label="Sep", color="cornflowerblue")
+ax.set_xlabel("Throughput capacity [A.h]")
+ax.set_ylabel("Porosity")
+ax.set_title("Porosity vs Throughput")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.plot(throughput, disp_Gr, "-", lw=3, label="Avg", color="midnightblue")
+ax.plot(throughput, cc_Gr, "--", lw=3, label="cc", color="royalblue")
+ax.plot(throughput, s_Gr, ":", lw=3, label="Sep", color="cornflowerblue")
+ax.set_xlabel("Throughput capacity [A.h]")
+#ax.set_ylabel("Porosity")
+ax.set_ylabel("Gr radius [m]")
+#ax.set_title("X-avg Negative electrode porosity")
+ax.set_title("Gr Radius change vs Throughput")
+ax.legend()
+plt.tight_layout()
+plt.show()'''
+
+# --- SOH on cycle 500 from 1C discharge capacity ---
+# Initial-cycle discharge capacity (end of the first discharge step)
+soh = np.min(dis_cap2) / np.min(dis_cap1) * 100
+print(f"State of Health (SOH) after {num_cycles} cycles at {c_rate}C: {soh:.2f}%")
