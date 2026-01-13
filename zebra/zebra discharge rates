@@ -1,0 +1,476 @@
+"""
+Zebra Battery DFN Model - Dual Chemistry (NiCl2 + FeCl2)
+Simulates both reaction plateaus (2.58V and 2.35V).
+Includes Multi-Rate Simulation (C/4, C/8, C/24).
+"""
+
+import pybamm
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import style
+import matplotlib.ticker as ticker
+
+# ==================== 1. GLOBAL SPATIAL VARIABLE ====================
+var_x = pybamm.SpatialVariable(
+    "x", domain=["positive electrode"], coord_sys="cartesian"
+)
+
+
+# ==================== 2. DUAL CHEMISTRY MODEL CLASS ====================
+
+class ZebraDualModel(pybamm.BaseModel):
+    def __init__(self, name="Zebra Dual DFN"):
+        super().__init__(name)
+        self.variables = {}
+        self.build_model_equations()
+
+    def build_model_equations(self):
+        # --- Constants ---
+        F = 96485
+        R = 8.314
+
+        # --- Parameters ---
+        A = pybamm.Parameter("Electrode area [m2]")
+        L_cat = pybamm.Parameter("Positive electrode thickness [m]")
+        T = pybamm.Parameter("Operating temperature [K]")
+
+        # Transport Props
+        sigma_elec = pybamm.Parameter("Electrolyte conductivity [S.m-1]")
+        sigma_Ni_bulk = pybamm.Parameter("Nickel conductivity [S.m-1]")
+        sigma_Fe_bulk = pybamm.Parameter("Iron conductivity [S.m-1]")
+        bruggeman = pybamm.Parameter("Bruggeman coefficient")
+
+        # Chemistry (Ni & Fe)
+        E_eq_Ni = pybamm.Parameter("Nickel OCV [V]")
+        E_eq_Fe = pybamm.Parameter("Iron OCV [V]")
+        j0_Ni_ref = pybamm.Parameter("Nickel exchange current density [A.m-3]")
+        j0_Fe_ref = pybamm.Parameter("Iron exchange current density [A.m-3]")
+        alpha = pybamm.Parameter("Transfer coefficient")
+
+        # Initial Concentrations
+        c_NiCl2_init = pybamm.Parameter("Initial NiCl2 concentration [mol.m-3]")
+        c_FeCl2_init = pybamm.Parameter("Initial FeCl2 concentration [mol.m-3]")
+        c_NaCl_init = pybamm.Parameter("Initial NaCl concentration [mol.m-3]")
+        c_Ni_init = pybamm.Parameter("Initial Ni concentration [mol.m-3]")
+        c_Fe_init = pybamm.Parameter("Initial Fe concentration [mol.m-3]")
+
+        # Load
+        I_app = pybamm.FunctionParameter("Current function [A]", {"Time [s]": pybamm.t})
+
+        # --- STATE VARIABLES ---
+        # Solving for concentrations of BOTH active materials
+        c_NiCl2 = pybamm.Variable("NiCl2 concentration [mol.m-3]", domain="positive electrode")
+        c_FeCl2 = pybamm.Variable("FeCl2 concentration [mol.m-3]", domain="positive electrode")
+        phi_e = pybamm.Variable("Electrolyte potential [V]", domain="positive electrode")
+        phi_s = pybamm.Variable("Electrode potential [V]", domain="positive electrode")
+
+        # --- DERIVED QUANTITIES (Stoichiometry) ---
+        delta_Ni = c_NiCl2_init - c_NiCl2
+        delta_Fe = c_FeCl2_init - c_FeCl2
+
+        c_Ni = c_Ni_init + delta_Ni
+        c_Fe = c_Fe_init + delta_Fe
+        c_NaCl = c_NaCl_init + 2 * (delta_Ni + delta_Fe)
+
+        # Volume Fractions Calculation (Densities in g/cm3 -> *1e6 for g/m3)
+        v_Ni = c_Ni * 58.69 / (8.9 * 1e6)
+        v_Fe = c_Fe * 55.85 / (7.87 * 1e6)
+        v_NiCl2 = c_NiCl2 * 129.6 / (3.55 * 1e6)
+        v_FeCl2 = c_FeCl2 * 126.8 / (3.16 * 1e6)
+        v_NaCl = c_NaCl * 58.44 / (2.17 * 1e6)
+
+        v_solid = v_Ni + v_Fe + v_NiCl2 + v_FeCl2 + v_NaCl
+
+        # Porosity
+        eps = pybamm.maximum(0.02, 1 - v_solid)
+
+        # Effective Conductivities
+        kappa_eff = sigma_elec * eps ** bruggeman
+        sigma_eff = sigma_Ni_bulk * (v_Ni ** bruggeman) + sigma_Fe_bulk * (v_Fe ** bruggeman)
+
+        # --- KINETICS ---
+        # 1. Nickel Reaction (2.58 V)
+        eta_Ni = phi_s - phi_e - E_eq_Ni
+
+        c_NiCl2_safe = pybamm.maximum(c_NiCl2, 1e-6)  # Clamp to small positive value
+        soc_Ni = c_NiCl2_safe / (c_NiCl2_init + 1e-10)
+
+        j0_Ni_eff = j0_Ni_ref * (soc_Ni ** (2 / 3))
+
+        eta_lim_Ni = pybamm.maximum(-5.0, pybamm.minimum(5.0, eta_Ni))
+        j_Ni = j0_Ni_eff * (
+                pybamm.exp((1 - alpha) * 2 * F * eta_lim_Ni / (R * T)) -
+                pybamm.exp(-alpha * 2 * F * eta_lim_Ni / (R * T))
+        )
+
+        # 2. Iron Reaction (2.35 V)
+        eta_Fe = phi_s - phi_e - E_eq_Fe
+
+        c_FeCl2_safe = pybamm.maximum(c_FeCl2, 1e-6)
+        soc_Fe = c_FeCl2_safe / (c_FeCl2_init + 1e-10)
+        j0_Fe_eff = j0_Fe_ref * (soc_Fe ** (2 / 3))
+
+        eta_Fe_lim = pybamm.maximum(-5.0, pybamm.minimum(5.0, eta_Fe))
+        j_Fe_raw = j0_Fe_eff * (
+                pybamm.exp((1 - alpha) * 2 * F * eta_Fe_lim / (R * T)) -
+                pybamm.exp(-alpha * 2 * F * eta_Fe_lim / (R * T))
+        )
+
+        # PARASITIC REACTION PROTECTION:
+        # Prevent Iron oxidation (charging) when potential > 2.35V during discharge sim
+        j_Fe = pybamm.minimum(0, j_Fe_raw)
+
+        # Total Reaction Current
+        j_total = j_Ni + j_Fe
+
+        # --- GOVERNING EQUATIONS ---
+        # 1. Mass Balance
+        dcdt_NiCl2 = j_Ni / (2 * F)
+        dcdt_FeCl2 = j_Fe / (2 * F)
+
+        # 2. Charge Balance
+        i_e = -kappa_eff * pybamm.grad(phi_e)
+        i_s = -sigma_eff * pybamm.grad(phi_s)
+
+        # Scaling for stability
+        eqn_phi_e = (pybamm.div(i_e) - j_total) / sigma_elec
+        eqn_phi_s = (pybamm.div(i_s) + j_total) / sigma_Ni_bulk
+
+        # --- MODEL DICTIONARY ---
+        self.rhs = {
+            c_NiCl2: dcdt_NiCl2,
+            c_FeCl2: dcdt_FeCl2
+        }
+        self.algebraic = {phi_e: eqn_phi_e, phi_s: eqn_phi_s}
+
+        # --- BOUNDARY CONDITIONS ---
+        self.boundary_conditions = {
+            phi_e: {
+                "left": (0, "Dirichlet"),
+                "right": (0, "Neumann")
+            },
+            phi_s: {
+                "left": (0, "Neumann"),
+                "right": (-I_app / pybamm.boundary_value(sigma_eff * A, "right"), "Neumann")
+            },
+            c_NiCl2: {"left": (0, "Neumann"), "right": (0, "Neumann")},
+            c_FeCl2: {"left": (0, "Neumann"), "right": (0, "Neumann")}
+        }
+
+        # Initial Conditions
+        self.initial_conditions = {
+            c_NiCl2: c_NiCl2_init,
+            c_FeCl2: c_FeCl2_init,
+            phi_e: 0,
+            phi_s: E_eq_Ni
+        }
+
+        # --- EVENTS ---
+        self.events = [
+            pybamm.Event("Cutoff Voltage", pybamm.boundary_value(phi_s, "right") - 1.6),
+            pybamm.Event("Fully Discharged", pybamm.min(c_NiCl2 + c_FeCl2) - 0.1)
+        ]
+
+        # --- VARIABLES ---
+        self.variables = {
+            "Voltage [V]": pybamm.boundary_value(phi_s, "right"),
+            "Current [A]": I_app,
+            "NiCl2 concentration [mol.m-3]": c_NiCl2,
+            "FeCl2 concentration [mol.m-3]": c_FeCl2,
+            "Porosity": eps,
+            "Discharge capacity [A.h]": I_app * pybamm.t / 3600
+        }
+        self.L_cat_param = L_cat
+
+
+# ==================== 3. PARAMETERS ====================
+
+def get_parameters(current_value=5.0):
+    # Stabilizing Ramp
+    ramp_duration = 60.0  # 60 seconds ramp
+
+    def current_ramp(t):
+        return current_value * pybamm.minimum(t / ramp_duration, 1)
+
+    # --- 1. ACTIVE MATERIAL (Fixed by Capacity Density 80/20) ---
+    c_density_si = 0.327 * 1e6  # Ah/m3
+    F = 26.8  # Ah/mol e-
+    c_active_total = c_density_si / (2 * F)
+
+    c_NiCl2_int = c_active_total * 0.8
+    c_FeCl2_int = c_active_total * 0.2
+
+    # --- 2. INERT MATERIAL (33% Utilization) ---
+    utilization = 0.33475  # UPDATED from 34%
+    # utilization = 0.34
+
+    # Calculate Total Metal needed (Active + Inert)
+    c_Ni_total = c_NiCl2_int / utilization
+    c_Fe_total = c_FeCl2_int / utilization
+
+    # Inert Metal (Backbone)
+    c_Ni_inert_val = c_Ni_total - c_NiCl2_int
+    c_Fe_inert_val = c_Fe_total - c_FeCl2_int
+
+    # --- 3. SALT (NaCl based on 48:12:40 Mass Ratios) ---
+    # Mass Ratios at Full Discharge:
+    w_Ni = 0.48
+    w_Fe = 0.12
+    w_NaCl = 0.40
+
+    M_Ni = 58.69
+    M_NaCl = 58.44
+
+    # Relative Moles:
+    n_rel_Ni = w_Ni / M_Ni
+    n_rel_NaCl = w_NaCl / M_NaCl
+
+    # Ratio NaCl / Total Ni in discharged state
+    ratio_NaCl_Ni = n_rel_NaCl / n_rel_Ni
+
+    # Calculate Total NaCl needed to satisfy this ratio with the calculated Ni Total
+    c_NaCl_total_dis = c_Ni_total * ratio_NaCl_Ni
+
+    # Calculate Initial Excess NaCl (at Charged State)
+    # Total NaCl = Initial Excess + 2 * (Active Ni + Active Fe)
+    consumed_NaCl = 2 * (c_NiCl2_int + c_FeCl2_int)
+
+    # c_NaCl_init_val = max(0, c_NaCl_total_dis - consumed_NaCl)
+    c_NaCl_init_val = c_NaCl_total_dis - consumed_NaCl
+
+    print(f"--- Initialization Calculation ---")
+    print(f"Active NiCl2: {c_NiCl2_int:.0f} mol/m3")
+    print(f"Active FeCl2: {c_FeCl2_int:.0f} mol/m3")
+    print(f"Inert Ni: {c_Ni_inert_val:.0f} mol/m3")
+    print(f"Inert Fe: {c_Fe_inert_val:.0f} mol/m3")
+    print(f"Initial Excess NaCl: {c_NaCl_init_val:.0f} mol/m3")
+
+    # Conductivity Parameters (Temperature dependent)
+    T = 573.15  # 300 C
+    sigma_Ni = 1 / (16.24e-6 * (1 + 0.0069 * (T - 293.15)))
+    sigma_Fe = 1 / (19.71e-6 * (1 + 0.0065 * (T - 293.15)))
+
+    mB = 0.5436 - 1.972e-4 * T + 2.346e-7 * T ** 2
+    sigma_electrolyte = (0.145 - (1.827 * mB) + (- 0.5715 + 6.358 * mB) * 1e-3 * T) * 100
+
+    params = pybamm.ParameterValues({
+        "Positive electrode thickness [m]": 0.01, #10mm  # 5mm
+        "Electrode area [m2]": 0.01,  # 100 cm2
+        "Operating temperature [K]": T,
+
+        "Electrolyte conductivity [S.m-1]": sigma_electrolyte,
+        "Nickel conductivity [S.m-1]": sigma_Ni,
+        "Iron conductivity [S.m-1]": sigma_Fe,
+        "Bruggeman coefficient": 1.5,
+
+        "Nickel OCV [V]": 2.58,
+        "Iron OCV [V]": 2.35,
+
+        "Nickel exchange current density [A.m-3]": 50000,
+        "Iron exchange current density [A.m-3]": 15000,
+        "Transfer coefficient": 0.2175,
+
+        "Initial NiCl2 concentration [mol.m-3]": c_NiCl2_int,
+        "Initial FeCl2 concentration [mol.m-3]": c_FeCl2_int,
+        "Initial NaCl concentration [mol.m-3]": c_NaCl_init_val,
+        "Initial Ni concentration [mol.m-3]": c_Ni_inert_val,
+        "Initial Fe concentration [mol.m-3]": c_Fe_inert_val,
+
+        "Current function [A]": current_ramp,
+    })
+
+    return params
+
+
+# ==================== 4. SIMULATION RUNNER ====================
+
+def run_multi_rate_simulation():
+    # 1. Calculate Theoretical Capacity
+    # L = 0.010 m (10 mm)
+    # V = 0.01 m2 * 0.010 m = 1e-4 m3
+    # Density = 0.327 * 1e6 Ah/m3
+    # Capacity = 32.7 Ah
+    L_cat_val = 0.010
+    theoretical_capacity_Ah = (0.01 * L_cat_val) * (0.327 * 1e6)
+    print(f"Calculated Theoretical Capacity: {theoretical_capacity_Ah:.2f} Ah (Depth: {L_cat_val * 1000}mm)")
+
+    # Define C-rates
+    c_rates = [1 / 4, 1 / 8, 1 / 24]
+    labels = ["C/4", "C/8", "C/24"]
+    colors = ["Cornflowerblue", "RoyalBlue","midnightblue"]
+
+
+    results = []
+
+    # Loop through rates
+    for rate, label in zip(c_rates, labels):
+        current_val = theoretical_capacity_Ah * rate
+        print(f"\nRunning {label} Simulation (Current: {current_val:.3f} A)...")
+
+        # Get params with specific current
+        params = get_parameters(current_value=current_val)
+
+        # Process Model
+        model = ZebraDualModel()
+        L_cat_symbol = model.L_cat_param  # Get symbolic param
+
+        geometry = pybamm.Geometry({
+            "positive electrode": {var_x: {"min": 0, "max": L_cat_symbol}}
+        })
+
+        params.process_model(model)
+        params.process_geometry(geometry)
+
+        mesh = pybamm.Mesh(
+            geometry,
+            {"positive electrode": pybamm.Uniform1DSubMesh},
+            {var_x: 20}
+        )
+
+        disc = pybamm.Discretisation(mesh, {"positive electrode": pybamm.FiniteVolume()})
+        disc.process_model(model)
+
+        # Solve
+        solver = pybamm.CasadiSolver(
+            mode="safe",
+            dt_max=600,
+            root_tol=1e-3,
+            extra_options_setup={"max_num_steps": 50000}
+        )
+
+        # Dynamic Time: Estimate hours + 20% buffer
+        est_hours = (1 / rate) * 1.2
+        t_eval = np.linspace(0, 3600 * est_hours, 1000)
+
+        solution = solver.solve(model, t_eval)
+        results.append(solution)
+        print(f"Completed {label}. Final Voltage: {solution['Voltage [V]'].entries[-1]:.3f}V")
+
+    # Pass specific L_cat float value for plotting axis
+    plot_results(results, labels, colors, L_cat_float=L_cat_val)
+
+
+def plot_results(solutions, labels, colors, L_cat_float):
+    """
+    Generates 5 separate plotting figures with specific styling.
+    """
+    # ─── Styling ─────────────────────────
+    style.use('ggplot')
+    pybamm.set_logging_level("INFO")
+
+    SMALL_SIZE, MEDIUM_SIZE, BIGGER_SIZE = 20, 24, 26
+    plt.rcParams["font.family"] = "Times New Roman"
+    plt.rcParams['axes.facecolor'] = 'none'
+    plt.rcParams['axes.edgecolor'] = 'black'
+    plt.rc('font', size=MEDIUM_SIZE)
+    plt.rc('axes', titlesize=MEDIUM_SIZE)
+    plt.rc('axes', labelsize=MEDIUM_SIZE)
+    plt.rc('xtick', labelsize=MEDIUM_SIZE)
+    plt.rc('ytick', labelsize=MEDIUM_SIZE)
+    plt.rc('legend', fontsize=SMALL_SIZE)
+    plt.rc('figure', titlesize=BIGGER_SIZE)
+
+    # --- PLOT 1: Voltage vs Discharge Capacity ---
+    plt.figure(figsize=(8, 6))
+    for sol, label, color in zip(solutions, labels, colors):
+        capacity = sol["Discharge capacity [A.h]"].entries
+        voltage = sol["Voltage [V]"].entries
+        plt.plot(capacity, voltage, color=color, linewidth=3, label=label)
+
+    plt.xlabel("Discharged Capacity [Ah]")
+    plt.ylabel("Voltage [V]")
+    #plt.title("Voltage vs. Discharge Capacity")
+    plt.legend()
+    plt.grid(False)
+    plt.tight_layout()
+    plt.show()
+
+    # --- PLOT 2: Average Porosity vs Discharge Capacity ---
+    '''plt.figure(figsize=(10, 6))
+    for sol, label, color in zip(solutions, labels, colors):
+        capacity = sol["Discharge capacity [A.h]"].entries
+
+        # Porosity is 2D (Space x Time). We take mean across space (axis 0)
+        porosity_data = sol["Porosity"].entries
+        avg_porosity = np.mean(porosity_data, axis=0)
+
+        plt.plot(capacity, avg_porosity, color=color, linewidth=3, label=label)
+
+    plt.xlabel("Discharged Capacity [Ah]")
+    plt.ylabel("Average Porosity [-]")
+    plt.title("2. Avg. Porosity vs. Discharge Capacity")
+    plt.legend()
+    plt.grid(False)
+    plt.tight_layout()
+    plt.show()'''
+
+    # --- PLOT 3, 4, 5: INDIVIDUAL SPATIAL PROFILES PER C-RATE ---
+    # X-axis for depth (0 to L_cat)
+    # Note: Mesh size was 20 in simulation
+    x_nodes = np.linspace(0, L_cat_float, 20)
+    x_mm = x_nodes * 1000  # Convert m to mm for plotting
+
+    # New color palette for spatial profile lines
+    colors2 = ["Cornflowerblue", "RoyalBlue", "midnightblue", "grey", "black"]
+
+    # Loop through each simulation result (C-rate) to generate individual plots
+    for sol, label in zip(solutions, labels):
+        time_hours = sol.t / 3600.0
+
+        # Pick ~5 evenly spaced time indices
+        indices = np.linspace(0, len(time_hours) - 1, 5, dtype=int)
+
+        # --- 3. NiCl2 Concentration Spatial Profile (Individual) ---
+        plt.figure(figsize=(8, 6))
+        c_NiCl2 = sol["NiCl2 concentration [mol.m-3]"].entries
+        for j, idx in enumerate(indices):
+            t_h = time_hours[idx]
+            plt.plot(x_mm, c_NiCl2[:, idx], color=colors2[j], label=f"{t_h:.1f} h", linewidth=3)
+
+        plt.title(f"({label})")
+        plt.xlabel("Cathode Depth [mm]")
+        plt.ylabel("NiCl2 Conc. [mol/m³]")
+        plt.xticks([0, 2.5, 5, 7.5, 10])
+        #plt.gca().yaxis.set_major_locator(ticker.LinearLocator(5))
+        plt.legend(loc="upper right",fontsize='small')
+        plt.grid(False)
+        plt.tight_layout()
+        plt.show()
+
+        # --- 4. FeCl2 Concentration Spatial Profile (Individual) ---
+        plt.figure(figsize=(8, 6))
+        c_FeCl2 = sol["FeCl2 concentration [mol.m-3]"].entries
+        for j, idx in enumerate(indices):
+            t_h = time_hours[idx]
+            plt.plot(x_mm, c_FeCl2[:, idx], color=colors2[j], label=f"{t_h:.1f} h", linewidth=3)
+
+        plt.title(f"({label})")
+        plt.xlabel("Cathode Depth [mm]")
+        plt.ylabel("FeCl2 Conc. [mol/m³]")
+        plt.xticks([0, 2.5, 5, 7.5, 10])
+        #plt.gca().yaxis.set_major_locator(ticker.LinearLocator(5))
+        plt.legend(loc="upper right",fontsize='small')
+        plt.grid(False)
+        plt.tight_layout()
+        plt.show()
+
+        # --- 5. Porosity Spatial Profile (Individual) ---
+        plt.figure(figsize=(8, 6))
+        porosity = sol["Porosity"].entries
+        for j, idx in enumerate(indices):
+            t_h = time_hours[idx]
+            plt.plot(x_mm, porosity[:, idx], color=colors2[j], label=f"{t_h:.1f} h", linewidth=3)
+
+        plt.title(f"({label})")
+        plt.xlabel("Cathode Depth [mm]")
+        plt.ylabel("Porosity")
+        plt.xticks([0, 2.5, 5, 7.5, 10])
+        plt.gca().yaxis.set_major_locator(ticker.LinearLocator(5))
+        plt.legend(loc="upper right",fontsize='small')
+        plt.grid(False)
+        plt.tight_layout()
+        plt.show()
+
+
+if __name__ == "__main__":
+    run_multi_rate_simulation()
