@@ -82,8 +82,8 @@ class ZebraDualModel(pybamm.BaseModel):
         # 2. Availability Factors (0.0 to 1.0)
         # Charging Fuel (Metal + NaCl)
         avail_NaCl = pybamm.maximum(c_NaCl, 1e-6) / c_NaCl_max_ref
-        avail_Ni_metal = pybamm.maximum(c_Ni, 1e-6) / c_Ni_max_ref
-        avail_Fe_metal = pybamm.maximum(c_Fe, 1e-6) / c_Fe_max_ref
+        avail_Ni_metal = pybamm.maximum(delta_Ni, 1e-6) / c_Ni_max_ref
+        avail_Fe_metal = pybamm.maximum(delta_Fe, 1e-6) / c_Fe_max_ref
 
         # Discharging Fuel (Chlorides)
         avail_Ni_salt = pybamm.maximum(c_NiCl2, 1e-6) / c_NiCl2_max
@@ -98,18 +98,20 @@ class ZebraDualModel(pybamm.BaseModel):
                 -
                 (avail_Ni_salt ** (2 / 3)) * pybamm.exp(-alpha * 2 * F * eta_Ni / (R * T))
         )
-        is_discharging = pybamm.sigmoid(I_app, 0, 100)
+
         # 2. IRON KINETICS (With Hard If/Else Logic)
         eta_Fe = phi_s - phi_e - E_eq_Fe
 
         # Calculate standard physics
-        j_Fe_raw = j0_Fe_ref * (
+        j_Fe = j0_Fe_ref * (
                 (avail_Fe_metal ** (2 / 3)) * (avail_NaCl ** (2 / 3)) * pybamm.exp(
             (1 - alpha) * 2 * F * eta_Fe / (R * T))
                 - (avail_Fe_salt ** (2 / 3)) * pybamm.exp(-alpha * 2 * F * eta_Fe / (R * T))
         )
-        j_Fe = pybamm.minimum(0, j_Fe_raw)
-        #j_Fe = is_discharging * j_Fe_clamped + (1 - is_discharging) * j_Fe_raw
+        #j_Fe = pybamm.minimum(0, j_Fe_raw)
+        #j_Fe_clamped = pybamm.minimum(0, j_Fe_raw)
+        #is_charging = pybamm.sigmoid(-I_app - 1e-4, 0, 1000)
+        #j_Fe = is_charging * j_Fe_raw + (1 - is_charging) * j_Fe_clamped
 
         j_total = j_Ni + j_Fe
 
@@ -195,8 +197,8 @@ def get_parameters():
         "Bruggeman coefficient": 1.5,
 
         # *** TUNED KINETICS (Forces clean steps) ***
-        "Nickel exchange current density [A.m-3]": 500000,
-        "Iron exchange current density [A.m-3]": 100000,
+        "Nickel exchange current density [A.m-3]": 50000,
+        "Iron exchange current density [A.m-3]": 15000,
 
         "Nickel OCV [V]": 2.58,
         "Iron OCV [V]": 2.35,
@@ -218,6 +220,7 @@ def get_parameters():
 
 def run_experiment_simulation():
     # We will test two rates to see the difference
+    #c_rates = ["C/4","C/8","C/24"]
     c_rates = ["C/24"]
     colors = ["red", "blue"]
     linestyles = ["-", "--"]
@@ -241,7 +244,7 @@ def run_experiment_simulation():
             [
                 f"Discharge at {rate} until 2.0V",
                 "Rest for 30 minutes",
-                f"Charge at {rate} until 2.7V",
+                f"Charge at {rate} until 2.8V",
                 "Rest for 30 minutes"
             ] * 1,
             period="2 minute"
@@ -268,7 +271,7 @@ def run_experiment_simulation():
 def plot_comparative_variables(solutions, labels, colors, linestyles):
         style.use('ggplot')
 
-        fig, axs = plt.subplots(2, 1, figsize=(10, 14), sharex=True)
+        fig, axs = plt.subplots(3, 1, figsize=(8, 12), sharex=True)
 
         for sol, label, color, ls in zip(solutions, labels, colors, linestyles):
             # Extract Mean Data
@@ -280,28 +283,29 @@ def plot_comparative_variables(solutions, labels, colors, linestyles):
             voltage = sol["Terminal voltage [V]"].entries
 
             # Plot 1: Concentrations
-            axs[1].plot(t, ele, color=color, linestyle=ls, linewidth=2, label=f"{label} - NiCl2")
-            #axs[1].plot(t, c_FeCl2, color=color, linestyle=":", linewidth=2, label=f"{label} - FeCl2")
+            axs[1].plot(t, c_NiCl2, color=color, linestyle=ls, linewidth=2, label=f"{label} - NiCl2")
+            axs[1].plot(t, c_FeCl2, color=color, linestyle=":", linewidth=2, label=f"{label} - FeCl2")
 
             # Plot 2: Porosity
-            #axs[2].plot(t, porosity, color=color, linestyle=ls, linewidth=2, label=label)
+            axs[2].plot(t, ele, color=color, linestyle=ls, linewidth=2, label=label)
 
             # Plot 3: Voltage
             axs[0].plot(t, voltage, color=color, linestyle=ls, linewidth=1.5, label=label)
 
         # Formatting
         axs[1].set_ylabel("Concentration [mol/m3]")
-        axs[1].set_title("Active Material Concentration (Solid=Ni, Dotted=Fe)")
+        #axs[1].set_title("Active Material Concentration (Solid=Ni, Dotted=Fe)")
         axs[1].legend(loc="upper right", fontsize=8)
         axs[1].grid(True)
 
-        #axs[1].set_ylabel("Porosity [-]")
-        #axs[1].set_title("Electrode Porosity Evolution")
-        #axs[1].legend(loc="lower right")
-        #axs[1].grid(True)
+        axs[2].set_ylabel("Ele-Conc [mol/m3]]")
+        #axs[2].set_title("Electrode Porosity Evolution")
+        axs[2].set_xlabel("Time [hours]")
+        axs[2].legend(loc="lower right")
+        axs[2].grid(True)
 
         axs[0].set_ylabel("Voltage [V]")
-        axs[0].set_xlabel("Time [hours]")
+
         axs[0].set_title("Voltage Profiles (5 Cycles)")
         axs[0].grid(True)
 
