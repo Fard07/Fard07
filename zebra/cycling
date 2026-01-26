@@ -2,6 +2,23 @@ import pybamm
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import style
+import matplotlib.cm as cm
+
+# ─── Styling ─────────────────────────
+style.use('ggplot')
+pybamm.set_logging_level("INFO")
+
+SMALL_SIZE, MEDIUM_SIZE, BIGGER_SIZE = 20, 24, 26
+plt.rcParams["font.family"] = "Times New Roman"
+plt.rcParams['axes.facecolor'] = 'none'
+plt.rcParams['axes.edgecolor'] = 'black'
+plt.rc('font', size=MEDIUM_SIZE)
+plt.rc('axes', titlesize=MEDIUM_SIZE)
+plt.rc('axes', labelsize=MEDIUM_SIZE)
+plt.rc('xtick', labelsize=MEDIUM_SIZE)
+plt.rc('ytick', labelsize=MEDIUM_SIZE)
+plt.rc('legend', fontsize=SMALL_SIZE)
+plt.rc('figure', titlesize=BIGGER_SIZE)
 
 # ==================== 1. GLOBAL SPATIAL VARIABLE ====================
 var_x = pybamm.SpatialVariable(
@@ -82,8 +99,8 @@ class ZebraDualModel(pybamm.BaseModel):
         # 2. Availability Factors (0.0 to 1.0)
         # Charging Fuel (Metal + NaCl)
         avail_NaCl = pybamm.maximum(c_NaCl, 1e-6) / c_NaCl_max_ref
-        avail_Ni_metal = pybamm.maximum(delta_Ni, 1e-6) / c_Ni_max_ref
-        avail_Fe_metal = pybamm.maximum(delta_Fe, 1e-6) / c_Fe_max_ref
+        avail_Ni_metal = pybamm.maximum(delta_Ni, 1e-6) / c_Ni_max_ref #only active material taken part in capacity
+        avail_Fe_metal = pybamm.maximum(delta_Fe, 1e-6) / c_Fe_max_ref #only active material taken part in capacity
 
         # Discharging Fuel (Chlorides)
         avail_Ni_salt = pybamm.maximum(c_NiCl2, 1e-6) / c_NiCl2_max
@@ -108,11 +125,8 @@ class ZebraDualModel(pybamm.BaseModel):
             (1 - alpha) * 2 * F * eta_Fe / (R * T))
                 - (avail_Fe_salt ** (2 / 3)) * pybamm.exp(-alpha * 2 * F * eta_Fe / (R * T))
         )
-        #j_Fe = pybamm.minimum(0, j_Fe_raw)
-        #j_Fe_clamped = pybamm.minimum(0, j_Fe_raw)
-        #is_charging = pybamm.sigmoid(-I_app - 1e-4, 0, 1000)
-        #j_Fe = is_charging * j_Fe_raw + (1 - is_charging) * j_Fe_clamped
 
+        # Total Current Density
         j_total = j_Ni + j_Fe
 
         # ====================================================================
@@ -124,6 +138,13 @@ class ZebraDualModel(pybamm.BaseModel):
         i_s = -sigma_eff * pybamm.grad(phi_s)
         eqn_phi_e = (pybamm.div(i_e) - j_total) / sigma_elec
         eqn_phi_s = (pybamm.div(i_s) + j_total) / ((sigma_Ni_bulk + sigma_Fe_bulk)/2)
+
+        # *** DoD Calculation ***
+        # DoD = 1 - (Current Active Mass / Max Active Mass)
+        # Using x_average because concentrations vary in space
+        c_active_current = pybamm.x_average(c_NiCl2) + pybamm.x_average(c_FeCl2)
+        c_active_max = c_NiCl2_init + c_FeCl2_init
+        DoD = 1 - (c_active_current / c_active_max)
 
         self.rhs = {c_NiCl2: dcdt_NiCl2, c_FeCl2: dcdt_FeCl2}
         self.algebraic = {phi_e: eqn_phi_e, phi_s: eqn_phi_s}
@@ -137,7 +158,7 @@ class ZebraDualModel(pybamm.BaseModel):
         }
 
         self.initial_conditions = {c_NiCl2: c_NiCl2_init, c_FeCl2: c_FeCl2_init, phi_e: 0, phi_s: E_eq_Ni}
-        self.events = []  # EXPERIMENT CONTROLS STOPPING
+        self.events = []  #Let pybamm.EXPERIMENT handle voltage cutoffs etc.
 
         self.variables = {
             "Time [s]": pybamm.t,
@@ -149,7 +170,8 @@ class ZebraDualModel(pybamm.BaseModel):
             "NiCl2 concentration [mol.m-3]": c_NiCl2,
             "FeCl2 concentration [mol.m-3]": c_FeCl2,
             "Discharge capacity [A.h]": I_app * pybamm.t / 3600,
-            "Porosity": eps
+            "Porosity": eps,
+            "Depth of Discharge": DoD
         }
         self.L_cat_param = L_cat
 
@@ -222,8 +244,8 @@ def run_experiment_simulation():
     # We will test two rates to see the difference
     #c_rates = ["C/4","C/8","C/24"]
     c_rates = ["C/24"]
-    colors = ["red", "blue"]
-    linestyles = ["-", "--"]
+    colors = ["midnightblue", "RoyalBlue","Cornflowerblue"]
+    linestyles = ["-", "--",":"]
 
     solutions = []
 
@@ -243,10 +265,10 @@ def run_experiment_simulation():
         experiment = pybamm.Experiment(
             [
                 f"Discharge at {rate} until 2.0V",
-                "Rest for 30 minutes",
+                #"Rest for 10 minutes",
                 f"Charge at {rate} until 2.8V",
-                "Rest for 30 minutes"
-            ] * 1,
+                #"Rest for 10 minutes"
+            ] *1,
             period="2 minute"
         )
 
@@ -266,73 +288,216 @@ def run_experiment_simulation():
         solutions.append(sol)
         print("Cycle Complete.")
 
-    plot_comparative_variables(solutions, c_rates, colors, linestyles)
+    plot(solutions, c_rates, colors, linestyles)
 
-def plot_comparative_variables(solutions, labels, colors, linestyles):
-        style.use('ggplot')
+def plot(solutions, labels, colors, linestyles):
 
-        fig, axs = plt.subplots(3, 1, figsize=(8, 12), sharex=True)
 
+        '''# ---------------- FIGURE 1: VOLTAGE ----------------
+        plt.figure(figsize=(8, 6))
         for sol, label, color, ls in zip(solutions, labels, colors, linestyles):
-            # Extract Mean Data
-            t = sol["Time [s]"].entries / 3600  # Hours
-            c_NiCl2 = np.mean(sol["NiCl2 concentration [mol.m-3]"].entries, axis=0)
-            c_FeCl2 = np.mean(sol["FeCl2 concentration [mol.m-3]"].entries, axis=0)
-            ele = np.mean(sol["Electrolyte potential [V]"].entries, axis=0)
-            porosity = np.mean(sol["Porosity"].entries, axis=0)
+            x_data = sol["Depth of Discharge"].entries
             voltage = sol["Terminal voltage [V]"].entries
+            plt.plot(x_data, voltage, color=color, linestyle=ls, linewidth=3, label=label)
 
-            # Plot 1: Concentrations
-            axs[1].plot(t, c_NiCl2, color=color, linestyle=ls, linewidth=2, label=f"{label} - NiCl2")
-            axs[1].plot(t, c_FeCl2, color=color, linestyle=":", linewidth=2, label=f"{label} - FeCl2")
-
-            # Plot 2: Porosity
-            axs[2].plot(t, ele, color=color, linestyle=ls, linewidth=2, label=label)
-
-            # Plot 3: Voltage
-            axs[0].plot(t, voltage, color=color, linestyle=ls, linewidth=1.5, label=label)
-
-        # Formatting
-        axs[1].set_ylabel("Concentration [mol/m3]")
-        #axs[1].set_title("Active Material Concentration (Solid=Ni, Dotted=Fe)")
-        axs[1].legend(loc="upper right", fontsize=8)
-        axs[1].grid(True)
-
-        axs[2].set_ylabel("Ele-Conc [mol/m3]]")
-        #axs[2].set_title("Electrode Porosity Evolution")
-        axs[2].set_xlabel("Time [hours]")
-        axs[2].legend(loc="lower right")
-        axs[2].grid(True)
-
-        axs[0].set_ylabel("Voltage [V]")
-
-        axs[0].set_title("Voltage Profiles (5 Cycles)")
-        axs[0].grid(True)
-
+        plt.ylabel("Voltage [V]")
+        plt.xlabel("DoD")
+        plt.xlim(-0.05, 1.05)
+        plt.legend(loc="best")
+        plt.grid(True)
         plt.tight_layout()
         plt.show()
+
+        # ---------------- FIGURE 2: CONCENTRATIONS ----------------
+        plt.figure(figsize=(8, 6))
+        for sol, label, color, ls in zip(solutions, labels, colors, linestyles):
+            x_data = sol["Depth of Discharge"].entries
+            c_NiCl2 = np.mean(sol["NiCl2 concentration [mol.m-3]"].entries, axis=0)
+            c_FeCl2 = np.mean(sol["FeCl2 concentration [mol.m-3]"].entries, axis=0)
+
+            plt.plot(x_data, c_NiCl2, color=color, linestyle=ls, linewidth=3, label=f"{label} - NiCl2")
+            plt.plot(x_data, c_FeCl2, color=color, linestyle=":", linewidth=3, label=f"{label} - FeCl2")
+
+        plt.ylabel("Concentration [mol/m3]")
+        plt.xlabel("DoD")
+        plt.xlim(-0.05, 1.05)
+        plt.legend(loc="best")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # ---------------- FIGURE 3: ELECTROLYTE POTENTIAL ----------------
+        plt.figure(figsize=(8, 6))
+        for sol, label, color, ls in zip(solutions, labels, colors, linestyles):
+            x_data = sol["Depth of Discharge"].entries
+            ele = np.mean(sol["Electrolyte potential [V]"].entries, axis=0)
+            plt.plot(x_data, ele, color=color, linestyle=ls, linewidth=3, label=label)
+
+        plt.ylabel("Electrolyte Potential [V]")
+        plt.xlabel("DoD")
+        plt.xlim(-0.05, 1.05)
+        plt.legend(loc="best")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # ---------------- FIGURE 4: Porosity ----------------
+        plt.figure(figsize=(8, 6))
+        for sol, label, color, ls in zip(solutions, labels, colors, linestyles):
+            x_data = sol["Depth of Discharge"].entries
+            ele = np.mean(sol["Porosity"].entries, axis=0)
+            plt.plot(x_data, ele, color=color, linestyle=ls, linewidth=3, label=label)
+
+        plt.ylabel("Porosity")
+        plt.xlabel("DoD")
+        plt.xlim(-0.05, 1.05)
+        plt.legend(loc="best")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show() '''
+
+
+
+        """
+            Plots spatial profiles at different TIME PERCENTAGES (0%, 25%, 50%, 75%, 100% of discharge time).
+        """
+        # 1. Determine Indices for Snapshots
+        '''time_array = solutions[0]["Time [s]"].entries 
+        total_steps = len(time_array)
+
+        # We want 5 snapshots: 0%, 25%, 50%, 75%, 100%
+        indices = [
+            0,
+            int(total_steps * 0.25),
+            int(total_steps * 0.50),
+            int(total_steps * 0.75),
+            int(total_steps * 0.85),
+            total_steps - 1
+        ]
+
+        labels = ["0", "0.25", "0.5", "0.75","0.85", "1.0"]
+
+        # Use a colormap for progression (Light Blue -> Dark Blue)
+        colors = cm.Blues(np.linspace(1.0, 0.4, len(indices)))
+
+        # Normalized thickness grid
+        x_grid = np.linspace(0, 10, 20)
+
+        # ---------------- PLOT 1: NiCl2 Evolution ----------------
+        plt.figure(figsize=(8, 6))
+        data_matrix = solutions[0]["NiCl2 concentration [mol.m-3]"].entries
+
+        for i, idx in enumerate(indices):
+            profile = data_matrix[:, idx]
+            plt.plot(x_grid, profile, color=colors[i], linewidth=3, label=labels[i])
+
+        plt.ylabel("NiCl2 Concentration [mol/m3]")
+        plt.xlabel("Cathode [mm]")
+        plt.title("NiCl2 Front Evolution")
+        plt.legend(loc="center right")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # ---------------- PLOT 2: FeCl2 Evolution ----------------
+        plt.figure(figsize=(8, 6))
+        data_matrix = solutions[0]["FeCl2 concentration [mol.m-3]"].entries
+
+        for i, idx in enumerate(indices):
+            profile = data_matrix[:, idx]
+            plt.plot(x_grid, profile, color=colors[i], linewidth=3, label=labels[i])
+
+        plt.ylabel("FeCl2 Concentration [mol/m3]")
+        plt.xlabel("Cathode [mm]")
+        plt.title("FeCl2 Front Evolution")
+        plt.legend(loc="center right")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # ---------------- PLOT 3: Porosity Evolution ----------------
+        plt.figure(figsize=(8, 6))
+        data_matrix = solutions[0]["Porosity"].entries
+
+        for i, idx in enumerate(indices):
+            profile = data_matrix[:, idx]
+            plt.plot(x_grid, profile, color=colors[i], linewidth=3, label=labels[i])
+
+        plt.ylabel("Porosity")
+        plt.yticks([0.55, 0.6, 0.65, 0.70])
+        plt.xlabel("Cathode [mm]")
+        plt.title("Porosity Evolution")
+        plt.legend(loc="center right")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()'''
+
+        full_current = solutions[0]["Current [A]"].entries
+
+        # 2. FILTER: Get indices where Current < 0 (Charging)
+        # Using -1e-5 to avoid floating point noise around 0
+        charging_indices = np.where(full_current < -1e-5)[0]
+        target_percentages = [0.0, 0.15, 0.50, 0.75, 1.0]
+        total_len = len(charging_indices)
+
+        # Calculate indices for these percentages
+        indices = []
+        for p in target_percentages:
+            # Map 0..1 to 0..total_len-1
+            idx = int((total_len - 1) * p)
+            indices.append(charging_indices[idx])
+
+        time_labels = ["0.0", "0.15", "0.50", "0.75", "1.0"]
+
+        # 4. COLOR: Deep Blue (Start) -> Light Blue (End)
+        colors = cm.Blues(np.linspace(1.0, 0.4, len(indices)))
+        x_grid = np.linspace(0, 10, 20)
+
+        # ---------------- PLOT 1: NiCl2 Evolution ----------------
+        plt.figure(figsize=(8, 6))
+        data_matrix = solutions[0]["NiCl2 concentration [mol.m-3]"].entries
+        for i, idx in enumerate(indices):
+            plt.plot(x_grid, data_matrix[:, idx], color=colors[i], linewidth=3, label=time_labels[i])
+        plt.ylabel("NiCl2 Concentration [mol/m3]")
+        plt.xlabel("Cathode [mm]")
+        plt.title("NiCl2 Charging Front")
+        plt.legend(loc="center right")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # ---------------- PLOT 2: FeCl2 Evolution ----------------
+        plt.figure(figsize=(8, 6))
+        data_matrix = solutions[0]["FeCl2 concentration [mol.m-3]"].entries
+        for i, idx in enumerate(indices):
+            plt.plot(x_grid, data_matrix[:, idx], color=colors[i], linewidth=3, label=time_labels[i])
+        plt.ylabel("FeCl2 Concentration [mol/m3]")
+        plt.xlabel("Cathode [mm]")
+        plt.title("FeCl2 Charging Front")
+        plt.legend(loc="center right")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # ---------------- PLOT 3: Porosity Evolution ----------------
+        plt.figure(figsize=(8, 6))
+        data_matrix = solutions[0]["Porosity"].entries
+        for i, idx in enumerate(indices):
+            plt.plot(x_grid, data_matrix[:, idx], color=colors[i], linewidth=3, label=time_labels[i])
+        plt.ylabel("Porosity")
+        plt.yticks([0.55, 0.6, 0.65, 0.70])
+        plt.xlabel("Cathode [mm]")
+        plt.title("Porosity Charging Front")
+        plt.legend(loc="center right")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+
 if __name__ == "__main__":
     run_experiment_simulation()
 
-    '''plot_results(solutions, c_rates, colors)
-def plot_results(solutions, labels, colors):
-    style.use('ggplot')
 
-
-    plt.figure(figsize=(10, 6))
-
-    for sol, label, color in zip(solutions, labels, colors):
-        dis = sol["Time [h]"].entries
-        vol = sol["Terminal voltage [V]"].entries
-        plt.plot(dis, vol, color=color, linewidth=2, label=label)
-
-    plt.xlabel("Time [h]")
-    plt.ylabel("Voltage [V]")
-    plt.title("Zebra Battery Cycle (Discharge -> Charge)")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()'''
 
 
 
