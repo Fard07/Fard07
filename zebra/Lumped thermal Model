@@ -1,0 +1,414 @@
+import pybamm
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import style
+import matplotlib.cm as cm
+
+# ─── Styling ─────────────────────────
+style.use('ggplot')
+pybamm.set_logging_level("INFO")
+
+SMALL_SIZE, MEDIUM_SIZE, BIGGER_SIZE = 20, 24, 26
+plt.rcParams["font.family"] = "Times New Roman"
+plt.rcParams['axes.facecolor'] = 'none'
+plt.rcParams['axes.edgecolor'] = 'black'
+plt.rc('font', size=MEDIUM_SIZE)
+plt.rc('axes', titlesize=MEDIUM_SIZE)
+plt.rc('axes', labelsize=MEDIUM_SIZE)
+plt.rc('xtick', labelsize=MEDIUM_SIZE)
+plt.rc('ytick', labelsize=MEDIUM_SIZE)
+plt.rc('legend', fontsize=SMALL_SIZE)
+plt.rc('figure', titlesize=BIGGER_SIZE)
+
+# ==================== 1. GLOBAL SPATIAL VARIABLE ====================
+var_x = pybamm.SpatialVariable(
+    "x", domain=["positive electrode"], coord_sys="cartesian"
+)
+
+
+# ==================== 2. DUAL CHEMISTRY MODEL CLASS ====================
+
+class ZebraDualModel(pybamm.BaseModel):
+    def __init__(self, name="Zebra Dual DFN"):
+        super().__init__(name)
+        self.summary_variables = []
+        self.variables = {}
+        self.build_model_equations()
+
+    def build_model_equations(self):
+        # --- Constants & Parameters ---
+        F = 96485
+        R = 8.314
+        A = pybamm.Parameter("Electrode area [m2]")
+        L_cat = pybamm.Parameter("Positive electrode thickness [m]")
+        #T = pybamm.Parameter("Operating temperature [K]")
+
+        # --- Thermal Variables ---
+        # We define T_cell as a "Scalar" variable (depends only on time, not x)
+        T_cell = pybamm.Variable("Cell temperature [K]")
+        T_amb = pybamm.Parameter("Ambient temperature [K]")
+        T_init = pybamm.Parameter("Initial temperature [K]")
+
+        # Thermal Parameters
+        h_cool = pybamm.Parameter("Heat transfer coefficient [W.m-2.K-1]")
+        Cp = pybamm.Parameter("Cell specific heat capacity [J.kg-1.K-1]")
+        rho = pybamm.Parameter("Cell density [kg.m-3]")
+        dU_dT = pybamm.Parameter("Entropic coefficient [V.K-1]")  # From Paper (2.16e-4)
+
+        # Transport & Chemistry
+        #sigma_elec = pybamm.Parameter("Electrolyte conductivity [S.m-1]")
+        #sigma_Ni_bulk = pybamm.Parameter("Nickel conductivity [S.m-1]")
+        #sigma_Fe_bulk = pybamm.Parameter("Iron conductivity [S.m-1]")
+
+        bruggeman = pybamm.Parameter("Bruggeman coefficient")
+        E_eq_Ni = pybamm.Parameter("Nickel OCV [V]")
+        E_eq_Fe = pybamm.Parameter("Iron OCV [V]")
+        j0_Ni_ref = pybamm.Parameter("Nickel exchange current density [A.m-3]")
+        j0_Fe_ref = pybamm.Parameter("Iron exchange current density [A.m-3]")
+        alpha = pybamm.Parameter("Transfer coefficient")
+
+        # Initial Concentrations
+        c_NiCl2_init = pybamm.Parameter("Initial NiCl2 concentration [mol.m-3]")
+        c_FeCl2_init = pybamm.Parameter("Initial FeCl2 concentration [mol.m-3]")
+        c_NaCl_init = pybamm.Parameter("Initial NaCl concentration [mol.m-3]")
+        c_Ni_inert = pybamm.Parameter("Inert Ni concentration [mol.m-3]")
+        c_Fe_inert = pybamm.Parameter("Inert Fe concentration [mol.m-3]")
+
+        I_app = pybamm.FunctionParameter("Current function [A]", {"Time [s]": pybamm.t})
+
+        # --- STATE VARIABLES ---
+        c_NiCl2 = pybamm.Variable("NiCl2 concentration [mol.m-3]", domain="positive electrode")
+        c_FeCl2 = pybamm.Variable("FeCl2 concentration [mol.m-3]", domain="positive electrode")
+        phi_e = pybamm.Variable("Electrolyte potential [V]", domain="positive electrode")
+        phi_s = pybamm.Variable("Electrode potential [V]", domain="positive electrode")
+
+        # --- COUPLED PARAMETERS (Temperature Dependent) ---
+        # 1. Electrolyte Conductivity (From Paper/User Code)
+        # Replacing 'T' with 'T_cell'
+        mB = 0.5436 - 1.972e-4 * T_cell + 2.346e-7 * T_cell ** 2
+        sigma_elec = (0.145 - (1.827 * mB) + (- 0.5715 + 6.358 * mB) * 1e-3 * T_cell) * 100
+
+        # 2. Metal Conductivities (From Paper)
+        sigma_Ni_bulk = 1 / (16.24e-6 * (1 + 0.0069 * (T_cell - 293.15)))
+        sigma_Fe_bulk = 1 / (19.71e-6 * (1 + 0.0065 * (T_cell - 293.15)))
+
+        # --- DERIVED QUANTITIES (Stoichiometry) ---
+        delta_Ni = c_NiCl2_init - c_NiCl2
+        delta_Fe = c_FeCl2_init - c_FeCl2
+        c_Ni = c_Ni_inert + delta_Ni
+        c_Fe = c_Fe_inert + delta_Fe
+        c_NaCl = c_NaCl_init + 2 * (delta_Ni + delta_Fe)
+
+        # Volume Fractions & Conductivity
+        v_Ni = c_Ni * 58.69 / (8.9 * 1e6)
+        v_Fe = c_Fe * 55.85 / (7.87 * 1e6)
+        v_NiCl2 = c_NiCl2 * 129.6 / (3.55 * 1e6)
+        v_FeCl2 = c_FeCl2 * 126.8 / (3.16 * 1e6)
+        v_NaCl = c_NaCl * 58.44 / (2.17 * 1e6)
+        v_solid = v_Ni + v_Fe + v_NiCl2 + v_FeCl2 + v_NaCl
+        eps = pybamm.maximum(0.02, 1 - v_solid)
+        kappa_eff = sigma_elec * eps ** bruggeman
+        sigma_eff = sigma_Ni_bulk * (v_Ni ** bruggeman) + sigma_Fe_bulk * (v_Fe ** bruggeman)
+
+        # ==================== KINETICS (ROBUST EXPLICIT) ====================
+
+        # 1. Define Max Constants (Full Tank Size) to prevent division by zero
+        c_NiCl2_max = pybamm.Parameter("Initial NiCl2 concentration [mol.m-3]") / 0.8
+        c_FeCl2_max = pybamm.Parameter("Initial FeCl2 concentration [mol.m-3]") / 0.2
+        c_Ni_max_ref = c_NiCl2_max
+        c_Fe_max_ref = c_FeCl2_max
+        c_NaCl_max_ref = 2 * (c_NiCl2_max + c_FeCl2_max) * 1.1
+
+        # 2. Availability Factors (0.0 to 1.0)
+        # Charging Fuel (Metal + NaCl)
+        avail_NaCl = pybamm.maximum(c_NaCl, 1e-6) / c_NaCl_max_ref
+        avail_Ni_metal = pybamm.maximum(delta_Ni, 1e-6) / c_Ni_max_ref #only active material taken part in capacity
+        avail_Fe_metal = pybamm.maximum(delta_Fe, 1e-6) / c_Fe_max_ref #only active material taken part in capacity
+
+        # Discharging Fuel (Chlorides)
+        avail_Ni_salt = pybamm.maximum(c_NiCl2, 1e-6) / c_NiCl2_max
+        avail_Fe_salt = pybamm.maximum(c_FeCl2, 1e-6) / c_FeCl2_max
+
+        # 3. NICKEL KINETICS
+        eta_Ni = phi_s - phi_e - E_eq_Ni
+        # Anodic (Charge) depends on Metal | Cathodic (Discharge) depends on Salt
+        j_Ni = j0_Ni_ref * (
+                (avail_Ni_metal ** (2 / 3)) * (avail_NaCl ** (2 / 3)) * pybamm.exp(
+            (1 - alpha) * 2 * F * eta_Ni / (R * T_cell))
+                -
+                (avail_Ni_salt ** (2 / 3)) * pybamm.exp(-alpha * 2 * F * eta_Ni / (R * T_cell))
+        )
+
+        # 2. IRON KINETICS (With Hard If/Else Logic)
+        eta_Fe = phi_s - phi_e - E_eq_Fe
+
+        # Calculate standard physics
+        j_Fe = j0_Fe_ref * (
+                (avail_Fe_metal ** (2 / 3)) * (avail_NaCl ** (2 / 3)) * pybamm.exp(
+            (1 - alpha) * 2 * F * eta_Fe / (R * T_cell))
+                - (avail_Fe_salt ** (2 / 3)) * pybamm.exp(-alpha * 2 * F * eta_Fe / (R * T_cell))
+        )
+
+        # Total Current Density
+        j_total = j_Ni + j_Fe
+
+        # ====================================================================
+        # --- HEAT GENERATION (Spatially Resolved) ---
+        # 1. Reversible (Entropic) Heat: j * T * dU/dT
+        q_rev = (j_Ni + j_Fe) * T_cell * dU_dT
+        # 2. Irreversible (Reaction) Heat: j * eta
+        q_irrev = j_Ni * eta_Ni + j_Fe * eta_Fe
+
+        # 3. Ohmic Heat: i_s * grad(phi_s) + i_e * grad(phi_e)
+        i_s = -sigma_eff * pybamm.grad(phi_s)
+        i_e = -kappa_eff * pybamm.grad(phi_e)
+        # Use pybamm.inner for dot product of fluxes
+        q_ohm = -pybamm.inner(i_s, pybamm.grad(phi_s)) - pybamm.inner(i_e, pybamm.grad(phi_e))
+
+        # Total Volumetric Heat [W/m3]
+        q_total = q_rev + q_irrev + q_ohm
+        # Integrate to get Total Watts [W]
+        Q_gen_total = pybamm.Integral(q_total, var_x) * A
+        # --- THERMAL ENERGY BALANCE ---
+        # Volume of the cell (active area * thickness)
+        # Note: In a real lumped model we might include casing mass, but here we use active volume
+        V_cell = A * L_cat
+
+        # Cooling Term (Newton's Law)
+        Q_cool = h_cool * A * (T_cell - 573.15)  # Assuming sink is at 300 degC
+
+        # dT/dt = (Q_gen - Q_cool) / (rho * Cp * V)
+        dTdt = (Q_gen_total - Q_cool) / (rho * Cp * V_cell)
+
+        # --- EQUATIONS ---
+        dcdt_NiCl2 = j_Ni / (2 * F)
+        dcdt_FeCl2 = j_Fe / (2 * F)
+        eqn_phi_e = (pybamm.div(i_e) - j_total) / sigma_elec
+        eqn_phi_s = (pybamm.div(i_s) + j_total) / ((sigma_Ni_bulk + sigma_Fe_bulk)/2)
+
+
+        # *** DoD Calculation ***
+        # DoD = 1 - (Current Active Mass / Max Active Mass)
+        # Using x_average because concentrations vary in space
+        c_active_current = pybamm.x_average(c_NiCl2) + pybamm.x_average(c_FeCl2)
+        c_active_max = c_NiCl2_init + c_FeCl2_init
+        DoD = 1 - (c_active_current / c_active_max)
+
+        self.rhs = {c_NiCl2: dcdt_NiCl2, c_FeCl2: dcdt_FeCl2, T_cell: dTdt}
+        self.algebraic = {phi_e: eqn_phi_e, phi_s: eqn_phi_s}
+
+        self.boundary_conditions = {
+            phi_e: {"left": (0, "Dirichlet"), "right": (0, "Neumann")},
+            phi_s: {"left": (0, "Neumann"),
+                    "right": (-I_app / pybamm.boundary_value(sigma_eff * A, "right"), "Neumann")},
+            c_NiCl2: {"left": (0, "Neumann"), "right": (0, "Neumann")},
+            c_FeCl2: {"left": (0, "Neumann"), "right": (0, "Neumann")}
+        }
+
+        self.initial_conditions = {c_NiCl2: c_NiCl2_init, c_FeCl2: c_FeCl2_init,
+                                   phi_e: 0, phi_s: E_eq_Ni,T_cell: T_init}
+        self.events = []  #Let pybamm.EXPERIMENT handle voltage cutoffs etc.
+
+        self.variables = {
+            "Time [s]": pybamm.t,
+            "Time [h]": pybamm.t / 3600,
+            "Voltage [V]": pybamm.boundary_value(phi_s, "right"),
+            "Terminal voltage [V]": pybamm.boundary_value(phi_s, "right"),
+            "Battery voltage [V]": pybamm.boundary_value(phi_s, "right"),
+            "Current [A]": I_app,
+            "NiCl2 concentration [mol.m-3]": c_NiCl2,
+            "FeCl2 concentration [mol.m-3]": c_FeCl2,
+            "Discharge capacity [A.h]": I_app * pybamm.t / 3600,
+            "Porosity": eps,
+            "Depth of Discharge": DoD,
+            "Cell temperature [K]": T_cell,
+            "Total Heat Generation [W]": Q_gen_total,
+            "Cooling [W]": Q_cool
+        }
+        self.L_cat_param = L_cat
+
+
+# ==================== 3. PARAMETERS (TUNED) ====================
+
+def get_parameters():
+    c_density_si = 0.327 * 1e6
+    F = 26.8
+    c_active_total = c_density_si / (2 * F)
+
+    # 80/20 Ratio
+    c_NiCl2_max = c_active_total * 0.8
+    c_FeCl2_max = c_active_total * 0.2
+
+    utilization = 0.33475
+    c_Ni_total = c_NiCl2_max / utilization
+    c_Fe_total = c_FeCl2_max / utilization
+    c_Ni_inert_val = c_Ni_total - c_NiCl2_max
+    c_Fe_inert_val = c_Fe_total - c_FeCl2_max
+
+    w_Ni, w_NaCl = 0.48, 0.40
+    n_rel_Ni, n_rel_NaCl = w_Ni / 58.69, w_NaCl / 58.44
+    c_NaCl_total_dis = c_Ni_total * (n_rel_NaCl / n_rel_Ni)
+    consumed_NaCl = 2 * (c_NiCl2_max + c_FeCl2_max)
+    c_NaCl_init_val =c_NaCl_total_dis - consumed_NaCl  # Start Charged
+
+    nominal_capacity = (0.01 * 0.01) * (0.327 * 1e6)
+
+    T = 573.15
+    #sigma_Ni = 1 / (16.24e-6 * (1 + 0.0069 * (T - 293.15)))
+    #sigma_Fe = 1 / (19.71e-6 * (1 + 0.0065 * (T - 293.15)))
+    #mB = 0.5436 - 1.972e-4 * T + 2.346e-7 * T ** 2
+    #sigma_electrolyte = (0.145 - (1.827 * mB) + (- 0.5715 + 6.358 * mB) * 1e-3 * T) * 100
+
+    params = pybamm.ParameterValues({
+        "Positive electrode thickness [m]": 0.01,
+        "Electrode area [m2]": 0.01,  # i think it should be active electrode area # cerun ?????
+        #"Operating temperature [K]": T,
+        "Nominal cell capacity [A.h]": nominal_capacity,
+
+        "Initial temperature [K]": 573.15,
+        "Ambient temperature [K]": 298.15,
+
+        "Heat transfer coefficient [W.m-2.K-1]": 5.0,
+        "Cell specific heat capacity [J.kg-1.K-1]": 1000,
+        "Cell density [kg.m-3]": 2500,
+        "Entropic coefficient [V.K-1]": 2.16e-4,
+
+        # *** TUNED CONDUCTIVITY (Prevents Plateau Overlap) ***
+        #"Electrolyte conductivity [S.m-1]": sigma_electrolyte, #250,
+        #"Nickel conductivity [S.m-1]": sigma_Ni,#500000,
+        #"Iron conductivity [S.m-1]": sigma_Fe, #500000,
+        "Bruggeman coefficient": 1.5,
+
+        # *** TUNED KINETICS (Forces clean steps) ***
+        "Nickel exchange current density [A.m-3]": 50000,
+        "Iron exchange current density [A.m-3]": 15000,
+
+        "Nickel OCV [V]": 2.58,
+        "Iron OCV [V]": 2.35,
+        "Transfer coefficient": 0.5,  # Symmetric #ask cerun ?????
+
+        # *** INITIALIZATION: FULLY CHARGED ***
+        "Initial NiCl2 concentration [mol.m-3]": c_NiCl2_max,
+        "Initial FeCl2 concentration [mol.m-3]": c_FeCl2_max,
+        "Initial NaCl concentration [mol.m-3]": c_NaCl_init_val,
+        "Inert Ni concentration [mol.m-3]": c_Ni_inert_val,
+        "Inert Fe concentration [mol.m-3]": c_Fe_inert_val,
+
+        "Current function [A]": 0.0
+    })
+    return params
+
+
+# ==================== 4. RUNNER (DISCHARGE & CHARGE) ====================
+
+def run_experiment_simulation():
+    # We will test two rates to see the difference
+    #c_rates = ["C/4","C/8","C/24"]
+    c_rates = ["C/24"]
+    colors = ["midnightblue", "RoyalBlue","Cornflowerblue"]
+    linestyles = ["-", "--",":"]
+
+    solutions = []
+
+    # Setup Geometry
+    var_x = pybamm.SpatialVariable("x", domain=["positive electrode"], coord_sys="cartesian")
+    geometry = pybamm.Geometry({"positive electrode": {var_x: {"min": 0, "max": 0.01}}})
+    submesh_types = {"positive electrode": pybamm.Uniform1DSubMesh}
+    var_pts = {var_x: 20}
+    spatial_methods = {"positive electrode": pybamm.FiniteVolume()}
+
+    params = get_parameters()
+
+    for rate in c_rates:
+        print(f"\nRunning Cycle at {rate}...")
+
+        # *** THE EXPERIMENT: Discharge -> Rest -> Charge ***
+        experiment = pybamm.Experiment(
+            [
+                f"Discharge at {rate} until 2.0V",
+                #"Rest for 10 minutes",
+                f"Charge at {rate} until 2.8V",
+                #"Rest for 10 minutes"
+            ] *1,
+            period="2 minute"
+        )
+
+        model = ZebraDualModel()
+        sim = pybamm.Simulation(
+            model,
+            experiment=experiment,
+            parameter_values=params,
+            geometry=geometry,
+            submesh_types=submesh_types,
+            var_pts=var_pts,
+            spatial_methods=spatial_methods,
+            solver=pybamm.CasadiSolver(mode="safe", dt_max=600)
+            #solver = pybamm.IDAKLUSolver()
+        )
+
+        sol = sim.solve()
+        solutions.append(sol)
+        print("Cycle Complete.")
+
+    plot(solutions, c_rates, colors, linestyles)
+
+def plot(solutions, labels, colors, linestyles):
+
+    sol = solutions[0]
+    time = sol["Time [h]"].entries
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 12))
+
+    # 1. Voltage
+    axes[0, 0].plot(time, sol["Voltage [V]"].entries, 'b-', linewidth=2)
+    axes[0, 0].set_title("Voltage")
+    axes[0, 0].set_ylabel("Voltage [V]")
+    #axes[0, 0].set_xlabel("Time [h]")
+    axes[0, 0].grid(True)
+
+    # 2. Concentrations
+    c_Ni = np.mean(sol["NiCl2 concentration [mol.m-3]"].entries, axis=0)
+    c_Fe = np.mean(sol["FeCl2 concentration [mol.m-3]"].entries, axis=0)
+    axes[0, 1].plot(time, c_Ni, 'g-', label="NiCl2")
+    axes[0, 1].plot(time, c_Fe, 'r--', label="FeCl2")
+    axes[0, 1].set_title("Average Concentrations")
+    axes[0, 1].set_ylabel("Concentration [mol/m3]")
+    #axes[0, 1].set_xlabel("Time [h]")
+    axes[0, 1].legend()
+    axes[0, 1].grid(True)
+
+    # 3. Temperature
+    temp = sol["Cell temperature [K]"].entries
+    axes[1, 0].plot(time, temp, 'r-', linewidth=2)
+    axes[1, 0].set_title("Cell Temperature")
+    axes[1, 0].set_ylabel("Temperature [K]")
+    axes[1, 0].set_xlabel("Time [h]")
+    axes[1, 0].grid(True)
+
+    # 4. Heat Generation
+    q_gen = sol["Total Heat Generation [W]"].entries
+    q_cool = sol["Cooling [W]"].entries
+    axes[1, 1].plot(time, q_gen, 'k-', label="Generated")
+    axes[1, 1].plot(time, q_cool, 'b:', label="Cooling")
+    axes[1, 1].set_title("Heat Balance")
+    axes[1, 1].set_ylabel("Power [W]")
+    axes[1, 1].set_xlabel("Time [h]")
+    axes[1, 1].legend()
+    axes[1, 1].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+        run_experiment_simulation()
+
+
+
+
+
+
+
+
+
+
+
