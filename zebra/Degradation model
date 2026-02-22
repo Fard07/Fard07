@@ -1,8 +1,9 @@
-import os
-import matplotlib.pyplot as plt
-import numpy as np
 import pybamm
+import numpy as np
+import matplotlib.pyplot as plt
 from matplotlib import style
+import matplotlib.cm as cm
+
 
 # ─── Styling ─────────────────────────
 style.use('ggplot')
@@ -19,502 +20,756 @@ plt.rc('xtick', labelsize=MEDIUM_SIZE)
 plt.rc('ytick', labelsize=MEDIUM_SIZE)
 plt.rc('legend', fontsize=SMALL_SIZE)
 plt.rc('figure', titlesize=BIGGER_SIZE)
-# location of the path
-out_dir = r"E:\MTP project\Results\porousAnodeResult\16.7.25\BOL-C-rate-30%soc"
-os.makedirs(out_dir, exist_ok=True)
 
-# ─── Build model & base parameters ───────────────
-model = pybamm.lithium_ion.DFN({
-    "particle phases": ("2", "1"),
-    "open-circuit potential": (("single", "current sigmoid"), "single"),
-    "particle mechanics": ("swelling only", "none"),
-    "loss of active material": ("stress-driven", "none"),
-    "SEI": "solvent-diffusion limited",
-    "SEI porosity change": "true",
-    "particle": "Fickian diffusion",
-    "cell geometry": "arbitrary",
-    "lithium plating": "partially reversible",
-    "lithium plating porosity change": "true",
-})
-parameter_values = pybamm.ParameterValues("Chen2020_composite")
-
-# ─── C‑rates to loop over ─────────────────────────
-# c_rates     = [0.5, 1.0, 2.0]
-c_rates = [0.5]
-tp_list = []
-si_pct_list = []
-gr_pct_list = []
-Vsi_pct_list = []
-Vgr_pct_list = []
-disp_Si_list = []
-disp_Gr_list = []
-cc_Si, s_Si, cc_Gr, s_Gr, X_Por, cc_Por, s_Por = [], [], [], [], [], [], []
-
-# ─── Loop: run sim for each C‑rate ────────────────
-for c_rate in c_rates:
-    parameter_values.update({
-        "Lithium plating transfer coefficient": 0.5,
-        "Dead lithium decay constant [s-1]": 1e-6,
-        "Primary: Maximum concentration in negative electrode [mol.m-3]": 28700,
-        "Primary: Initial concentration in negative electrode [mol.m-3]": 23000,
-        "Secondary: Initial concentration in negative electrode [mol.m-3]": 277000,
-        "Secondary: Maximum concentration in negative electrode [mol.m-3]": 278000,
-        # final updated parameter for BoL&EoL for 30% soc
-        "Positive electrode LAM constant proportional term [s-1]": 1.7778e-07,
-        "Secondary: Negative electrode partial molar volume [m3.mol-1]": 1.20e-05,
-        "Positive electrode partial molar volume [m3.mol-1]": 1.2e-06,
+# ==================== 1. GLOBAL SPATIAL VARIABLE ====================
+var_x = pybamm.SpatialVariable(
+    "x", domain=["positive electrode"], coord_sys="cartesian"
+)
 
 
-        "Primary: Negative electrode LAM constant proportional term [s-1]": 8.05e-9, #1.7778e-06,
-        "Secondary: Negative electrode LAM constant proportional term [s-1]": 8.05e-10, #1.5778e-07,
-        "Primary: Outer SEI solvent diffusivity [m2.s-1]": 2.5e-24,
-        "Secondary: Outer SEI solvent diffusivity [m2.s-1]": 9.5e-22,
+# ==================== 2. DUAL CHEMISTRY MODEL CLASS ====================
 
-    }, check_already_exists=False)
+class ZebraDualModel(pybamm.BaseModel):
+    def __init__(self, name="Zebra Dual DFN"):
+        super().__init__(name)
+        self.summary_variables = []
+        self.variables = {}
+        self.build_model_equations()
 
-    experiment = pybamm.Experiment([
-                                       (
-                                           f"Discharge at {c_rate}C until 2.5V",
-                                           "Charge at 0.3C for 3600 seconds (3 minute period)",
-                                       )
-                                   ] * 3200)
+    def build_model_equations(self):
+        # --- Constants & Parameters ---
+        F = 96485
+        R = 8.314
+        A = pybamm.Parameter("Electrode area [m2]")
+        L_cat = pybamm.Parameter("Positive electrode thickness [m]")
+        # T = pybamm.Parameter("Operating temperature [K]")
 
-    sim = pybamm.Simulation(
-        model,
-        experiment=experiment,
-        parameter_values=parameter_values,
-        solver=pybamm.IDAKLUSolver(),
-        discretisation_kwargs={"remove_independent_variables_from_rhs": True},
-    )
-    sol = sim.solve(calc_esoh=False)
+        # --- Thermal Variables ---
+        # We define T_cell as a "Scalar" variable (depends only on time, not x)
+        T_cell = pybamm.Variable("Cell temperature [K]")
+        T_amb = pybamm.Parameter("Ambient temperature [K]")
+        T_init = pybamm.Parameter("Initial temperature [K]")
 
-    cyc_2 = sol.cycles[-1]
-    cyc_1 = sol.cycles[1]
-    t = cyc_2["Time [s]"].entries
-    throughput = cyc_2["Throughput capacity [A.h]"].entries
-    dis_cap2 = cyc_2["Discharge capacity [A.h]"].entries
-    dis_cap1 = cyc_1["Discharge capacity [A.h]"].entries
-    Rs = parameter_values["Secondary: Negative particle radius [m]"]
-    Rp = parameter_values["Primary: Negative particle radius [m]"]
-    disp_Si = cyc_2["X-averaged negative secondary particle surface displacement [m]"].entries + Rs
-    disp_Gr = cyc_2["X-averaged negative primary particle surface displacement [m]"].entries + Rp
-    cc_Si.append(cyc_2["Negative secondary particle surface displacement [m]"].entries[0, :] + Rs)
-    s_Si.append(cyc_2["Negative secondary particle surface displacement [m]"].entries[-1, :] + Rs)
-    cc_Gr.append(cyc_2["Negative primary particle surface displacement [m]"].entries[0, :] + Rp)
-    s_Gr.append(cyc_2["Negative primary particle surface displacement [m]"].entries[-1, :] + Rp)
-    X_Por.append(cyc_2["X-averaged negative electrode porosity"].entries)
-    cc_Por.append(cyc_2["Negative electrode porosity"].entries[0, :])
-    s_Por.append(cyc_2["Negative electrode porosity"].entries[-1, :])
+        # Degradation (Dual Tracking)
+        active_area_Ni = pybamm.Variable("Active area fraction (Ni)")
+        active_area_Fe = pybamm.Variable("Active area fraction (Fe)")
 
-    # si_min = Rs.min()
-    # gr_min = Rp.min()
-    si_pct = disp_Si
-    gr_pct = disp_Gr
-    Vsi_pct = 3 * (disp_Si - Rs) / Rs * 100
-    Vgr_pct = 3 * (disp_Gr - Rp) / Rp * 100
+        # Degradation Params (Separate for Ni and Fe)
+        k_aging_Ni = pybamm.Parameter("Aging rate constant Ni [s-1]")
+        k_aging_Fe = pybamm.Parameter("Aging rate constant Fe [s-1]")
+        E_aging = pybamm.Parameter("Aging activation energy [J.mol-1]")
+        beta_aging = pybamm.Parameter("DOD stress factor")
 
-    tp_list.append(throughput)
-    si_pct_list.append(si_pct)
-    gr_pct_list.append(gr_pct)
-    Vsi_pct_list.append(Vsi_pct)
-    Vgr_pct_list.append(Vgr_pct)
-    disp_Gr_list.append(disp_Gr)
-    disp_Si_list.append(disp_Si)
+        # Thermal Parameters
+        h_cool = pybamm.Parameter("Heat transfer coefficient [W.m-2.K-1]")
+        Cp = pybamm.Parameter("Cell specific heat capacity [J.kg-1.K-1]")
+        rho = pybamm.Parameter("Cell density [kg.m-3]")
+        dU_dT = pybamm.Parameter("Entropic coefficient [V.K-1]")  # From Paper (2.16e-4)
 
-    SoH = np.max(dis_cap2) / np.max(dis_cap1) * 100
-    Lam = cyc_2["Loss of active material in negative electrode [%]"].entries[-1]
-    LLI = cyc_2["Loss of lithium inventory [%]"].entries[-1]
-    print("C-rate: %.2fC,  Discharge capacity: %.4f A.h,  SoH: %.2f%%" % (c_rate, np.max(dis_cap2), SoH))
-    print("LAM: %.2f%%, LLI: %.2f%%" % (Lam, LLI))
+        #bruggeman = pybamm.Parameter("Bruggeman coefficient")
+        E_eq_Ni = pybamm.Parameter("Nickel OCV [V]")
+        E_eq_Fe = pybamm.Parameter("Iron OCV [V]")
+        j0_Ni_ref = pybamm.Parameter("Nickel exchange current density [A.m-3]")
+        j0_Fe_ref = pybamm.Parameter("Iron exchange current density [A.m-3]")
+        alpha = pybamm.Parameter("Transfer coefficient")
 
-# ─── Helper: shading + arrows ───────────────────────
+        # Initial Concentrations
+        c_NiCl2_init = pybamm.Parameter("Initial NiCl2 concentration [mol.m-3]")
+        c_FeCl2_init = pybamm.Parameter("Initial FeCl2 concentration [mol.m-3]")
+        c_NaCl_init = pybamm.Parameter("Initial NaCl concentration [mol.m-3]")
+        c_Ni_inert = pybamm.Parameter("Inert Ni concentration [mol.m-3]")
+        c_Fe_inert = pybamm.Parameter("Inert Fe concentration [mol.m-3]")
+
+        I_app = pybamm.FunctionParameter("Current function [A]", {"Time [s]": pybamm.t})
+
+        # --- STATE VARIABLES ---
+        c_NiCl2 = pybamm.Variable("NiCl2 concentration [mol.m-3]", domain="positive electrode")
+        c_FeCl2 = pybamm.Variable("FeCl2 concentration [mol.m-3]", domain="positive electrode")
+        phi_e = pybamm.Variable("Electrolyte potential [V]", domain="positive electrode")
+        phi_s = pybamm.Variable("Electrode potential [V]", domain="positive electrode")
+
+        # --- COUPLED PARAMETERS (Temperature Dependent) ---
+        # 1. Electrolyte Conductivity (From Paper/User Code)
+        # Replacing 'T' with 'T_cell'
+        mB = 0.5436 - 1.972e-4 * T_cell + 2.346e-7 * T_cell ** 2
+        sigma_elec = (0.145 - (1.827 * mB) + (- 0.5715 + 6.358 * mB) * 1e-3 * T_cell) * 100
+
+        # 2. Metal Conductivities (From Paper)
+        sigma_Ni_bulk = 1 / (16.24e-6 * (1 + 0.0069 * (T_cell - 293.15)))
+        sigma_Fe_bulk = 1 / (19.71e-6 * (1 + 0.0065 * (T_cell - 293.15)))
+
+        # --- DERIVED QUANTITIES (Stoichiometry) ---
+        delta_Ni = c_NiCl2_init - c_NiCl2
+        delta_Fe = c_FeCl2_init - c_FeCl2
+        c_Ni = c_Ni_inert + delta_Ni
+        c_Fe = c_Fe_inert + delta_Fe
+        c_NaCl = c_NaCl_init + 2 * (delta_Ni + delta_Fe)
+
+        # Volume Fractions & Conductivity
+        v_Ni = c_Ni * 58.69 / (8.9 * 1e6)
+        v_Fe = c_Fe * 55.85 / (7.87 * 1e6)
+        v_NiCl2 = c_NiCl2 * 129.6 / (3.55 * 1e6)
+        v_FeCl2 = c_FeCl2 * 126.8 / (3.16 * 1e6)
+        v_NaCl = c_NaCl * 58.44 / (2.17 * 1e6)
+        v_solid = v_Ni + v_Fe + v_NiCl2 + v_FeCl2 + v_NaCl
+        eps = pybamm.maximum(0.02, 1 - v_solid)
+        v_Ni_conducting = v_Ni * active_area_Ni
+        v_Fe_conducting = v_Fe * active_area_Fe
+
+        b_fresh = pybamm.Scalar(2.5)
+        b_aged = pybamm.Scalar(3.5)
+        deg_state = 1.0 - active_area_Fe
+        bruggeman = b_fresh + (b_aged - b_fresh) * deg_state
+        kappa_eff = sigma_elec * eps ** bruggeman
+        sigma_eff = sigma_Ni_bulk * (v_Ni_conducting ** bruggeman) + sigma_Fe_bulk * (v_Fe_conducting ** bruggeman)
+
+        # ==================== KINETICS (ROBUST EXPLICIT) ====================
+
+        # 1. Define Max Constants (Full Tank Size) to prevent division by zero
+        c_NiCl2_max = pybamm.Parameter("Initial NiCl2 concentration [mol.m-3]") / 0.8
+        c_FeCl2_max = pybamm.Parameter("Initial FeCl2 concentration [mol.m-3]") / 0.2
+        c_Ni_max_ref = c_NiCl2_max
+        c_Fe_max_ref = c_FeCl2_max
+        c_NaCl_max_ref = 2 * (c_NiCl2_max + c_FeCl2_max) * 1.1
+
+        # 2. Availability Factors (0.0 to 1.0)
+        # Charging Fuel (Metal + NaCl)
+        avail_NaCl = pybamm.maximum(c_NaCl, 1e-6) / c_NaCl_max_ref
+        avail_Ni_metal = (pybamm.maximum(delta_Ni, 1e-6) / c_Ni_max_ref) * active_area_Ni  # only active material taken part in capacity
+        avail_Fe_metal = (pybamm.maximum(delta_Fe, 1e-6) / c_Fe_max_ref) * active_area_Fe  # only active material taken part in capacity
+
+        # Discharging Fuel (Chlorides)
+        avail_Ni_salt = (pybamm.maximum(c_NiCl2, 1e-6) / c_NiCl2_max) * active_area_Ni  #nickel is lost means cannot produce the salt
+        avail_Fe_salt = (pybamm.maximum(c_FeCl2, 1e-6) / c_FeCl2_max) * active_area_Fe
+
+        # 3. NICKEL KINETICS
+        eta_Ni = phi_s - phi_e - E_eq_Ni
+        # Anodic (Charge) depends on Metal | Cathodic (Discharge) depends on Salt
+        j0_Ni_eff = j0_Ni_ref * active_area_Ni
+
+        j_Ni = j0_Ni_eff * (
+                (avail_Ni_metal ** (2 / 3)) * (avail_NaCl ** (2 / 3)) * pybamm.exp(
+            (1 - alpha) * 2 * F * eta_Ni / (R * T_cell))
+                -
+                (avail_Ni_salt ** (2 / 3)) * pybamm.exp(-alpha * 2 * F * eta_Ni / (R * T_cell))
+        )
+
+        # 2. IRON KINETICS (With Hard If/Else Logic)
+        eta_Fe = phi_s - phi_e - E_eq_Fe
+
+        # Calculate standard physics
+        j0_Fe_eff = j0_Fe_ref * active_area_Fe
+
+        j_Fe = j0_Fe_eff * (
+                (avail_Fe_metal ** (2 / 3)) * (avail_NaCl ** (2 / 3)) * pybamm.exp(
+            (1 - alpha) * 2 * F * eta_Fe / (R * T_cell))
+                - (avail_Fe_salt ** (2 / 3)) * pybamm.exp(-alpha * 2 * F * eta_Fe / (R * T_cell))
+        )
+
+        # Total Current Density
+        j_total = j_Ni + j_Fe
+
+        # ====================================================================
+        # *** DoD Calculation ***
+        # DoD = 1 - (Current Active Mass / Max Active Mass)
+        # Using x_average because concentrations vary in space
+        c_active_current = pybamm.x_average(c_NiCl2) + pybamm.x_average(c_FeCl2)
+        c_active_max = c_NiCl2_init + c_FeCl2_init
+        DoD = 1 - (c_active_current / c_active_max)
+        #DoD = (pybamm.x_average(avail_Ni_metal) + pybamm.x_average(avail_Fe_metal))
+        # ====================================================================
+
+        # --- HEAT GENERATION (Spatially Resolved) ---
+        # 1. Reversible (Entropic) Heat: j * T * dU/dT
+        q_rev = (j_Ni + j_Fe) * T_cell * dU_dT
+        # 2. Irreversible (Reaction) Heat: j * eta
+        q_irrev = j_Ni * eta_Ni + j_Fe * eta_Fe
+
+        # 3. Ohmic Heat: i_s * grad(phi_s) + i_e * grad(phi_e)
+        i_s = -sigma_eff * pybamm.grad(phi_s)
+        i_e = -kappa_eff * pybamm.grad(phi_e)
+        # Use pybamm.inner for dot product of fluxes
+        q_ohm = -pybamm.inner(i_s, pybamm.grad(phi_s)) - pybamm.inner(i_e, pybamm.grad(phi_e))
+
+        # Total Volumetric Heat [W/m3]
+        q_total = q_rev + q_irrev + q_ohm
+        # Integrate to get Total Watts [W]
+        Q_gen_total = pybamm.Integral(q_total, var_x) * A
+        # --- THERMAL ENERGY BALANCE ---
+        V_cell = A * L_cat
+        # Cooling Term (Newton's Law)
+        Q_BMS = h_cool * A * (T_cell - 573.15)  # Assuming BMS is at 300 degC
+        #Q_BMS = 0.0  # For now, ignore cooling
+        # dT/dt = (Q_gen - Q_cool) / (rho * Cp * V)
+        dTdt = (Q_gen_total - Q_BMS) / (rho * Cp * V_cell)
+
+        # B. Degradation Equations (Dual LSW)
+        rate_factor = pybamm.exp(-E_aging / (R * T_cell))
+        stress_DoD = 1 + (beta_aging * DoD)
+
+        # NEW: Critical Threshold "Avalanche" Stress Factor (Gaussian Profile)
+        # Creates a massive spike in degradation rate ONLY when the area is near the critical threshold.
+        A_crit = pybamm.Parameter("Critical area threshold")
+        sigma_crit = pybamm.Parameter("Threshold transition width")
+        k_spike = pybamm.Parameter("Rapid drop multiplier")
+
+        # The mathematical bump: spikes to k_spike near A_crit, returns to 0 outside the window
+        stress_avalanche_Ni = 1 + k_spike * pybamm.exp(-((active_area_Ni - A_crit) / sigma_crit) ** 2)
+        stress_avalanche_Fe = 1 + k_spike * pybamm.exp(-((active_area_Fe - A_crit) / sigma_crit) ** 2)
+
+        # Combine stresses (Base * DoD * Avalanche)
+        k_deg_Ni = k_aging_Ni * rate_factor * stress_DoD * stress_avalanche_Ni
+        k_deg_Fe = k_aging_Fe * rate_factor * stress_DoD * stress_avalanche_Fe
+
+        # Standard 1st-order decay (the Gaussian factor now naturally handles the rapid plunge and smooth tail)
+        dArea_Ni_dt = -k_deg_Ni * active_area_Ni
+        dArea_Fe_dt = -k_deg_Fe * active_area_Fe
+
+        # --- EQUATIONS ---
+        dcdt_NiCl2 = j_Ni / (2 * F)
+        dcdt_FeCl2 = j_Fe / (2 * F)
+        eqn_phi_e = (pybamm.div(i_e) - j_total) / sigma_elec
+        eqn_phi_s = (pybamm.div(i_s) + j_total) / ((sigma_Ni_bulk + sigma_Fe_bulk) / 2)
 
 
-# ─── Combined Silicon plot ────────────────────────
-'''
-fig, ax = plt.subplots(figsize=(8,6))
-ax.plot(tp_list[0], Vsi_pct_list[0],"-" ,lw=3, label="0.5C", color="midnightblue")
-ax.plot(tp_list[1], Vsi_pct_list[1], "--", lw=3, label="1C", color="royalblue")
-ax.plot(tp_list[2], Vsi_pct_list[2], ":", lw=3, label="2C", color="cornflowerblue")   # correct label here
 
-y_max = 2*108
-mid   = 1.5 # you had hardcoded 5.6; better to use mid = per_cycle/2
-y0    = y_max + 3
+        self.rhs = {c_NiCl2: dcdt_NiCl2, c_FeCl2: dcdt_FeCl2, T_cell: dTdt,
+                    active_area_Ni: dArea_Ni_dt, active_area_Fe: dArea_Fe_dt}
+        self.algebraic = {phi_e: eqn_phi_e, phi_s: eqn_phi_s}
 
-# shading
-ax.fill_betweenx([-0.1, y_max], 0,    mid,       color="linen",   alpha=1)
-ax.fill_betweenx([-0.1, y_max], mid,  3, color="lavender",alpha=1)
-# discharge arrow
-ax.annotate("", xy=(0, y0),   xytext=(mid, y0),
-            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-            annotation_clip=False)
-ax.text(mid/2, y0 + y_max*0.01, "0.3C Charge",
-        ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+        self.boundary_conditions = {
+            phi_e: {"left": (0, "Dirichlet"), "right": (0, "Neumann")},
+            phi_s: {"left": (0, "Neumann"),
+                    "right": (-I_app / pybamm.boundary_value(sigma_eff * A, "right"), "Neumann")},
+            c_NiCl2: {"left": (0, "Neumann"), "right": (0, "Neumann")},
+            c_FeCl2: {"left": (0, "Neumann"), "right": (0, "Neumann")}
+        }
 
-# charge arrow
-ax.annotate("", xy=(mid, y0), xytext=(3, y0),
-            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-            annotation_clip=False)
-ax.text(mid + (3-mid)/2, y0 + y_max*0.01, "Discharge",
-        ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+        self.initial_conditions = {c_NiCl2: c_NiCl2_init, c_FeCl2: c_FeCl2_init, phi_e: 0, phi_s: E_eq_Ni,
+                                   T_cell: T_init, active_area_Ni: 1.0, active_area_Fe: 1.0}
+        self.events = []  # Let pybamm.EXPERIMENT handle voltage cutoffs etc.
 
-# axis formatting
-ax.spines["bottom"].set_position(("data", 0))
-ax.xaxis.set_ticks_position("bottom")
-ax.set_xlabel("Throughput Capacity [A·h]")
-ax.set_ylabel("Volume change [%]")
-#ax.set_xlim(-0.05*per_cycle, 1.1*per_cycle)
-ax.set_ylim(0, 124*2)
-ax.set_xticks([0,1.5,3])
-# legend (no empty string!)
-leg = ax.legend(loc="lower center", frameon=False, fontsize=SMALL_SIZE)
-for text in leg.get_texts():
-    text.set_color("black")
-
-plt.tight_layout()
-fname = "Avg_Si_Vol_with_C"
-fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
-fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
-plt.show()
-
-#---------------------##################   Radius change for silicon in different c-rates ################ ------------
-
-fig, ax = plt.subplots(figsize=(7.5, 6))
-ax.plot(tp_list[0], si_pct_list[0], "-", lw=3, label="0.5C", color="midnightblue")
-ax.plot(tp_list[1], si_pct_list[1], "--", lw=3, label="1C", color="royalblue")
-ax.plot(tp_list[2], si_pct_list[2], ":", lw=3, label="2C", color="cornflowerblue")  # correct label here
-
-y_max = 2.60e-6
-mid = 1.5  # you had hardcoded 5.6; better to use mid = per_cycle/2
-y0 = y_max
-
-# shading
-ax.fill_betweenx([-0.1, y_max], 0, mid, color="linen", alpha=1)
-ax.fill_betweenx([-0.1, y_max], mid, 3, color="lavender", alpha=1)
-# discharge arrow
-ax.annotate("", xy=(0, y0), xytext=(mid, y0),
-            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-            annotation_clip=False)
-ax.text(mid / 2, 2.62e-6, "0.3C Charge",
-        ha="center", va="bottom", fontsize=MEDIUM_SIZE)
-
-# charge arrow
-ax.annotate("", xy=(mid, y0), xytext=(3, y0),
-            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-            annotation_clip=False)
-ax.text(mid + (3 - mid) / 2, 2.62e-6 , "Discharge",
-        ha="center", va="bottom", fontsize=MEDIUM_SIZE)
-
-# axis formatting
-ax.spines["bottom"].set_position(("data", 1.5e-6))
-ax.xaxis.set_ticks_position("bottom")
-ax.set_xlabel("Throughput Capacity [A·h]")
-ax.set_ylabel("Radius [m]")
-# ax.set_xlim(-0.05*per_cycle, 1.1*per_cycle)
-ax.set_ylim(1.5e-6, 2.75e-6)
-ax.set_xticks([0,1.5,3])
-# legend (no empty string!)
-leg = ax.legend(loc="lower center", frameon=False, fontsize=SMALL_SIZE)
-for text in leg.get_texts():
-    text.set_color("black")
-
-plt.tight_layout()
-fname = "Avg_Si_Radi_with_C"
-fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
-fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
-plt.show()
+        self.variables = {
+            "Time [s]": pybamm.t,
+            "Time [h]": pybamm.t / 3600,
+            "Voltage [V]": pybamm.boundary_value(phi_s, "right"),
+            "Terminal voltage [V]": pybamm.boundary_value(phi_s, "right"),
+            "Battery voltage [V]": pybamm.boundary_value(phi_s, "right"),
+            "Current [A]": I_app,
+            "NiCl2 concentration [mol.m-3]": c_NiCl2,
+            "FeCl2 concentration [mol.m-3]": c_FeCl2,
+            "Throughput capacity [A.h]": I_app * pybamm.t / 3600,
+            "Porosity": eps,
+            "Depth of Discharge": DoD,
+            "Cell temperature [K]": T_cell,
+            "Total Heat Generation [W]": Q_gen_total,
+            "BMS Temperature [W]": Q_BMS,
+            "Active area fraction (Ni)": active_area_Ni,
+            "Active area fraction (Fe)": active_area_Fe,
+            "Electronic conductivity [S.m-1]": sigma_eff,
+            "Ionic conductivity [S.m-1]": kappa_eff,
+        }
+        self.L_cat_param = L_cat
 
 
-#--------------------------Radius of Silicon in seperator/Average/current collector side----------------
-c_rates = [0.5, 1, 2]
-for i in range(3):  # for indices 0, 1, 2
-    fig, ax = plt.subplots(figsize=(7.5, 6))
+# ==================== 3. PARAMETERS (TUNED) ====================
 
-    # Plot Si surface displacement curves
-    ax.plot(tp_list[i], disp_Si_list[i], "-", lw=3, label="Avg", color="midnightblue")
-    ax.plot(tp_list[i], s_Si[i], "--", lw=3, label="Sep", color="royalblue")
-    ax.plot(tp_list[i], cc_Si[i], ":", lw=3, label="CC", color="cornflowerblue")
+def get_parameters():
+    c_density_si = 0.327 * 1e6
+    F = 26.8
+    c_active_total = c_density_si / (2 * F)
 
-    # Y-axis scaling parameters
-    y_max = 2.6e-6
-    mid = 1.5 # midpoint for discharge/charge split
-    y0 = y_max
-    x_length = np.max(tp_list[i])
+    # 80/20 Ratio
+    c_NiCl2_max = c_active_total * 0.8
+    c_FeCl2_max = c_active_total * 0.2
 
-    # Shaded regions for discharge and charge
-    ax.fill_betweenx([-0.1, y_max], 0, mid, color="linen", alpha=1)
-    ax.fill_betweenx([-0.1, y_max], mid, x_length, color="lavender", alpha=1)
+    utilization = 0.33475
+    c_Ni_total = c_NiCl2_max / utilization
+    c_Fe_total = c_FeCl2_max / utilization
+    c_Ni_inert_val = c_Ni_total - c_NiCl2_max
+    c_Fe_inert_val = c_Fe_total - c_FeCl2_max
 
-    # Discharge arrow
-    ax.annotate("", xy=(0, y0), xytext=(mid, y0),
-                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-                annotation_clip=False)
-    ax.text(mid / 2, 2.61e-6,"0.3C charge" ,
-            ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+    w_Ni, w_NaCl = 0.48, 0.40
+    n_rel_Ni, n_rel_NaCl = w_Ni / 58.69, w_NaCl / 58.44
+    c_NaCl_total_dis = c_Ni_total * (n_rel_NaCl / n_rel_Ni)
+    consumed_NaCl = 2 * (c_NiCl2_max + c_FeCl2_max)
+    c_NaCl_init_val = c_NaCl_total_dis - consumed_NaCl  # Start Charged
 
-    # Charge arrow
-    ax.annotate("", xy=(mid, y0), xytext=(x_length, y0),
-                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-                annotation_clip=False)
-    ax.text(mid + (x_length - mid) / 2, 2.61e-6, f"{c_rates[i]}C Discharge",
-            ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+    nominal_capacity = (0.01 * 0.01) * (0.327 * 1e6)
 
-    # Axis formatting
-    ax.spines["bottom"].set_position(("data", 1.5e-6))
-    ax.xaxis.set_ticks_position("bottom")
-    ax.set_xlabel("Throughput Capacity [A·h]")
-    ax.set_ylabel("Radius [m]")
-    ax.set_ylim(1.5e-6, 2.75e-6)  # Ensure Rs is defined earlier
-    ax.set_xticks([0, 1.5, 3])
-    # Legend formatting
-    leg = ax.legend(loc="lower center", frameon=False, fontsize=SMALL_SIZE)
-    for text in leg.get_texts():
-        text.set_color("black")
+    T = 573.15
+    # sigma_Ni = 1 / (16.24e-6 * (1 + 0.0069 * (T - 293.15)))
+    # sigma_Fe = 1 / (19.71e-6 * (1 + 0.0065 * (T - 293.15)))
+    # mB = 0.5436 - 1.972e-4 * T + 2.346e-7 * T ** 2
+    # sigma_electrolyte = (0.145 - (1.827 * mB) + (- 0.5715 + 6.358 * mB) * 1e-3 * T) * 100
 
+    params = pybamm.ParameterValues({
+        "Positive electrode thickness [m]": 0.01,
+        "Electrode area [m2]": 0.01,  # i think it should be active electrode area # cerun ?????
+        # "Operating temperature [K]": T,
+        "Nominal cell capacity [A.h]": nominal_capacity,
+
+        "Initial temperature [K]": 573.15,
+        "Ambient temperature [K]": 298.15,
+
+        "Heat transfer coefficient [W.m-2.K-1]": 5.0,
+        "Cell specific heat capacity [J.kg-1.K-1]": 1000,
+        "Cell density [kg.m-3]": 2500,
+        "Entropic coefficient [V.K-1]": 2.16e-4,
+
+        # *** TUNED CONDUCTIVITY (Prevents Plateau Overlap) ***
+        # "Electrolyte conductivity [S.m-1]": sigma_electrolyte, #250,
+        # "Nickel conductivity [S.m-1]": sigma_Ni,#500000,
+        # "Iron conductivity [S.m-1]": sigma_Fe, #500000,
+        "Bruggeman coefficient": 1.5,
+
+        # *** TUNED KINETICS (Forces clean steps) ***
+        "Nickel exchange current density [A.m-3]": 50000,
+        "Iron exchange current density [A.m-3]": 15000,
+
+        "Nickel OCV [V]": 2.58,
+        "Iron OCV [V]": 2.35,
+        "Transfer coefficient": 0.5,  # Symmetric #ask cerun ?????
+
+        # *** INITIALIZATION: FULLY CHARGED ***
+        "Initial NiCl2 concentration [mol.m-3]": c_NiCl2_max,
+        "Initial FeCl2 concentration [mol.m-3]": c_FeCl2_max,
+        "Initial NaCl concentration [mol.m-3]": c_NaCl_init_val,
+        "Inert Ni concentration [mol.m-3]": c_Ni_inert_val,
+        "Inert Fe concentration [mol.m-3]": c_Fe_inert_val,
+        # *** DUAL DEGRADATION SETTINGS ***
+        # If you want Fe to degrade slower/faster, change these values
+        "Aging rate constant Ni [s-1]": 2.5e-5,
+        "Aging rate constant Fe [s-1]": 2.5e-5,  # Set same for now, or change to experiment
+        "Aging activation energy [J.mol-1]": 50000,
+        "DOD stress factor": 4.0,  # Example: Degradation is 6x faster when empty
+
+        # --- NEW TUNING KNOBS FOR THE AVALANCHE DROP ---
+        "Critical area threshold": 0.85,  # The SoH fraction where the rapid drop is fastest
+        "Threshold transition width": 0.10,  # How wide the rapid drop region is (e.g., +/- 15%)
+        "Rapid drop multiplier": 15.0,  # How severely it drops in that region (25x faster)
+
+        "Current function [A]": 0.0
+    })
+    return params
+
+
+# ==================== 4. RUNNER (DISCHARGE & CHARGE) ====================
+
+def run_experiment_simulation():
+    # We will test two rates to see the difference
+    # c_rates = ["C/4","C/8","C/24"]
+    c_rates = ["C/8"]
+    colors = ["midnightblue", "RoyalBlue", "Cornflowerblue"]
+    linestyles = ["-", "--", ":"]
+
+    solutions = []
+
+    # Setup Geometry
+    var_x = pybamm.SpatialVariable("x", domain=["positive electrode"], coord_sys="cartesian")
+    geometry = pybamm.Geometry({"positive electrode": {var_x: {"min": 0, "max": 0.01}}})
+    submesh_types = {"positive electrode": pybamm.Uniform1DSubMesh}
+    var_pts = {var_x: 20}
+    spatial_methods = {"positive electrode": pybamm.FiniteVolume()}
+
+    params = get_parameters()
+
+    for rate in c_rates:
+        print(f"\nRunning Cycle at {rate}...")
+
+        # *** THE EXPERIMENT: Discharge -> Rest -> Charge ***
+        experiment = pybamm.Experiment(
+            [(
+                f"Discharge at {rate} until 1.8V",
+                # "Rest for 10 minutes",
+                f"Charge at {rate} until 3.0V",
+                # "Rest for 10 minutes"
+            )] * 400,
+            period="10 minute"
+        )
+
+        model = ZebraDualModel()
+        sim = pybamm.Simulation(
+            model,
+            experiment=experiment,
+            parameter_values=params,
+            geometry=geometry,
+            submesh_types=submesh_types,
+            var_pts=var_pts,
+            spatial_methods=spatial_methods,
+            #solver=pybamm.CasadiSolver(mode="safe", dt_max=600)
+            solver = pybamm.IDAKLUSolver()
+        )
+
+        sol = sim.solve()
+        solutions.append(sol)
+        print("Cycle Complete.")
+        #plot_individual_soh_area(sol)
+        #plot_end_cycle_dynamics(sol)
+        analyze_depth_soh(sol)
+
+
+def analyze_depth_soh(sol):
+    # =================================================================
+    # 1. DATA EXTRACTION
+    # =================================================================
+    cycle_numbers = []
+
+    soh_ni_area = []
+    soh_fe_area = []
+    soh_capacity = []
+    soh_energy = []
+    avg_temp_C = []
+    avg_elec_cond = []
+    avg_ionic_cond = []
+
+    # Iterate through every cycle
+    for cycle_idx, cycle_sol in enumerate(sol.cycles):
+        for step_sol in cycle_sol.steps:
+            current = step_sol["Current [A]"].entries
+
+            # Check for Discharge Step
+            if np.mean(current) > 0.001:
+                # Material Health
+                ni_val = step_sol["Active area fraction (Ni)"].entries[-1] * 100
+                fe_val = step_sol["Active area fraction (Fe)"].entries[-1] * 100
+
+                # Performance Variables
+                t_sec = step_sol["Time [s]"].entries
+                v_term = step_sol["Terminal voltage [V]"].entries
+                i_app = np.abs(step_sol["Current [A]"].entries)
+                T_kelvin = step_sol["Cell temperature [K]"].entries
+
+                # Conductivity Variables (Average over space first)
+                sig_eff = step_sol["Electronic conductivity [S.m-1]"].entries
+                kap_eff = step_sol["Ionic conductivity [S.m-1]"].entries
+
+                if sig_eff.ndim > 1: sig_eff = np.mean(sig_eff, axis=0)
+                if kap_eff.ndim > 1: kap_eff = np.mean(kap_eff, axis=0)
+
+                # Integration Weights
+                dt = np.diff(t_sec)
+
+                # Align arrays
+                i_step = i_app[:-1]
+                v_step = v_term[:-1]
+                T_step = T_kelvin[:-1]
+                sig_step = sig_eff[:-1]
+                kap_step = kap_eff[:-1]
+
+                # Calculations
+                q_cycle = np.sum(i_step * dt) / 3600  # Ah
+                e_cycle = np.sum(v_step * i_step * dt) / 3600  # Wh
+
+                total_time = np.sum(dt)
+                T_avg_C = (np.sum(T_step * dt) / total_time) - 273.15
+                sig_avg = np.sum(sig_step * dt) / total_time
+                kap_avg = np.sum(kap_step * dt) / total_time
+
+                # Store
+                soh_ni_area.append(ni_val)
+                soh_fe_area.append(fe_val)
+                soh_capacity.append(q_cycle)
+                soh_energy.append(e_cycle)
+                avg_temp_C.append(T_avg_C)
+                avg_elec_cond.append(sig_avg)
+                avg_ionic_cond.append(kap_avg)
+                cycle_numbers.append(cycle_idx + 1)
+
+    # Normalize SOH
+    if not soh_capacity: return
+    q_init = soh_capacity[0]
+    e_init = soh_energy[0]
+    soh_capacity = [(q / q_init) * 100 for q in soh_capacity]
+    soh_energy = [(e / e_init) * 100 for e in soh_energy]
+
+    # Get Voltage Curves (Fresh vs Aged)
+    def get_voltage_curve(cycle_obj):
+        all_Q, all_V = [], []
+        cum_Q = 0
+        for step in cycle_obj.steps:
+            if np.mean(step["Current [A]"].entries) > 0.001:
+                t = step["Time [h]"].entries
+                v = step["Terminal voltage [V]"].entries
+                i = np.abs(step["Current [A]"].entries)
+                dt = np.diff(t)
+                dt = np.insert(dt, 0, 0)
+                step_q = np.cumsum(i * dt) + cum_Q
+                all_Q.extend(step_q)
+                all_V.extend(v)
+                cum_Q = step_q[-1]
+        return all_Q, all_V
+
+    q_fresh, v_fresh = get_voltage_curve(sol.cycles[0])
+    q_aged, v_aged = get_voltage_curve(sol.cycles[-1])
+
+    # =================================================================
+    # 2. PLOTTING (Separate Figures)
+    # =================================================================
+
+    # --- Plot 1: Material Health ---
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, soh_ni_area, 'g--', linewidth=2, label="Nickel")
+    plt.plot(cycle_numbers, soh_fe_area, 'r--', linewidth=2, label="Iron")
+    # plt.title("Physical Degradation")
+    plt.ylabel("Active Area [%]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
     plt.tight_layout()
-    fname = f"Spatial_Si_Vol_with_{c_rates[i]}C"
-    fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
-    fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
     plt.show()
 
-# ==============================================$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$=========================================#
-# ─── -----------------------------Combined Graphite plot -------------------------────────────
-
-fig, ax = plt.subplots(figsize=(7.5, 6))
-
-# Plot graphite curves with updated linewidths and labels
-ax.plot(tp_list[0], Vgr_pct_list[0], lw=3, linestyle="-", color="navy", label="0.5C")
-ax.plot(tp_list[1], Vgr_pct_list[1], lw=3, linestyle="--", color="teal", label="1C")
-ax.plot(tp_list[2], Vgr_pct_list[2], lw=3, linestyle=":", color="darkgreen", label="2C")
-
-# Parameters
-mid = 1.5
-per_cycle =3
-y_max = 2.5
-y0 = y_max + 0.02  # placement of arrows
-
-# Fill regions
-ax.fill_betweenx([0, y_max], 0, mid, color="linen", alpha=1)
-ax.fill_betweenx([0, y_max], mid, per_cycle, color="lavender", alpha=1)
-
-# Annotations for Discharge
-ax.annotate("", xy=(0, y0), xytext=(mid, y0),
-            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-            annotation_clip=False)
-ax.text(mid/2, y0 + 0.03, "0.3C Charge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
-
-# Annotations for Charge
-ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
-            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-            annotation_clip=False)
-ax.text(mid + (per_cycle - mid)/2, y0 + 0.03, "Discharge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
-
-# Axis labels and limits
-ax.spines["bottom"].set_position(("data", 0))
-ax.xaxis.set_ticks_position("bottom")
-ax.set_xlabel("Throughput Capacity [A.h]")
-ax.set_ylabel("Volume change [%]")
-ax.set_xlim(-0.05 * per_cycle, 1.055 * per_cycle)
-ax.set_ylim(0, 2.8)
-yticks = np.linspace(0, 2.8, 5)
-ax.set_yticks(yticks)
-ax.set_xticks([0,1.5,3])
-# Legend
-leg = ax.legend(loc="lower center", frameon=False, fontsize=SMALL_SIZE)
-for text in leg.get_texts():
-    text.set_color("black")
-
-plt.tight_layout()
-fname = "Avg_Gr_Vol_with_C"
-fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
-fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
-plt.show()
-
-#=======================================================================================================================
-#------------------------- Graphite particle absolute Radius------------
-
-fig, ax = plt.subplots(figsize=(7.5, 6))
-
-# Plot graphite curves with updated linewidths and labels
-ax.plot(tp_list[0], gr_pct_list[0], lw=3, linestyle="-", color="navy", label="0.5C")
-ax.plot(tp_list[1], gr_pct_list[1], lw=3, linestyle="--", color="teal", label="1C")
-ax.plot(tp_list[2], gr_pct_list[2], lw=3, linestyle=":", color="darkgreen", label="2C")
-
-# Parameters
-mid = 1.5
-per_cycle = 3
-y_max = 5.912e-6
-y0 = y_max  # placement of arrows
-
-# Fill regions
-ax.fill_betweenx([0, y_max], 0, mid, color="linen", alpha=1)
-ax.fill_betweenx([0, y_max], mid, per_cycle, color="lavender", alpha=1)
-
-# Annotations for Discharge
-ax.annotate("", xy=(0, y_max), xytext=(mid, y0),
-            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-            annotation_clip=False)
-ax.text(mid/2, y0 + 0.001e-6, "0.3C Charge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
-
-# Annotations for Charge
-ax.annotate("", xy=(mid, y_max), xytext=(per_cycle, y0),
-            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-            annotation_clip=False)
-ax.text(mid + (per_cycle - mid)/2, y0 + 0.001e-6, "Discharge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
-
-# Axis labels and limits
-ax.spines["bottom"].set_position(("data", 5.86e-6))
-ax.xaxis.set_ticks_position("bottom")
-ax.set_xlabel("Throughput Capacity [A.h]")
-ax.set_ylabel("Radius [m]")
-ax.set_xlim(-0.05 * per_cycle, 1.055 * per_cycle)
-ax.set_ylim(5.86e-6, 5.92e-6)
-ax.set_yticks([5.86e-6, 5.88e-6, 5.90e-6, 5.92e-6])
-#yticks = np.linspace(5.86e-6, 5.915e-6, 5)
-#ax.set_yticks(yticks)
-ax.set_xticks([0,1.5,3])
-# Legend
-first_legend = ax.legend(loc="lower center", frameon=False, fontsize=SMALL_SIZE)
-ax.add_artist(first_legend)  # Add the first legend as an artist
-
-plt.tight_layout()
-fname = "Avg_Gr_radii_with_C"
-fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
-fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
-plt.show()
-
-#--------------------Spatial side Graphite particle---------------
-
-c_rates = [0.5, 1, 2]
-for i in range(3):  # for indices 0, 1, 2
-    fig, ax = plt.subplots(figsize=(7.5, 6))
-
-    # Plot Si surface displacement curves
-    ax.plot(tp_list[i], disp_Gr_list[i], "-", lw=3, label="Avg", color="navy")
-    ax.plot(tp_list[i], s_Gr[i], "--", lw=3, label="Sep", color="teal")
-    ax.plot(tp_list[i], cc_Gr[i], ":", lw=3, label="CC", color="darkgreen")
-
-    # Parameters
-    mid = 1.5
-    per_cycle = np.max(tp_list[i])
-    y_max = 5.912e-6
-    y0 = y_max + 0.0007e-6  # placement of arrows
-
-    # Fill regions
-    ax.fill_betweenx([0, y_max], 0, mid, color="linen", alpha=1)
-    ax.fill_betweenx([0, y_max], mid, per_cycle, color="lavender", alpha=1)
-
-    # Annotations for Discharge
-    ax.annotate("", xy=(0, y0), xytext=(mid, y0),
-                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-                annotation_clip=False)
-    ax.text(mid / 2, y0 + 0.001e-6, "0.3C Charge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
-
-    # Annotations for Charge
-    ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
-                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
-                annotation_clip=False)
-    ax.text(mid + (per_cycle - mid) / 2, y0 + 0.001e-6, f"{c_rates[i]}C Discharge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
-
-    # Axis labels and limits
-    ax.spines["bottom"].set_position(("data", 5.86e-6))
-    ax.xaxis.set_ticks_position("bottom")
-    ax.set_xlabel("Throughput Capacity [A.h]")
-    ax.set_ylabel("Radius [m]")
-    ax.set_xlim(-0.05 * per_cycle, 1.055 * per_cycle)
-    ax.set_ylim(5.86e-6, 5.92e-6)
-    #yticks = np.linspace(5.86e-6, 5.91e-6, 5)
-    ax.set_yticks([5.86e-6,5.88e-6, 5.90e-6, 5.92e-6])
-    ax.set_xticks([0, 1.5, 3])
-    # Legend
-    first_legend = ax.legend(loc="lower center", frameon=False, fontsize=SMALL_SIZE)
-    ax.add_artist(first_legend)  # Add the first legend as an artist
-
+    # --- Plot 2: Performance SOH ---
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, soh_capacity, 'b-', linewidth=2, label="SOH Capacity (Ah)")
+    plt.plot(cycle_numbers, soh_energy, 'm--', linewidth=2, label="SOH Energy (Wh)")
+    # The gap represents efficiency loss due to Voltage Sag (Resistance).
+    plt.fill_between(cycle_numbers, soh_capacity, soh_energy,
+                     color='gray', alpha=0.2, label="Loss due to Resistance")
+    # plt.title("System Performance")
+    plt.ylabel("State of Health [%]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
     plt.tight_layout()
-    fname = f"Spatial_Gr_Radii_with_{c_rates[i]}C"
-    fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
-    fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+    plt.show()
+
+    # --- Plot 3: Electronic Conductivity ---
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, avg_elec_cond, color='tab:blue', linewidth=2, label="Electronic")
+    # plt.title("Electronic Conductivity")
+    plt.ylabel("Conductivity [S/m]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    # --- Plot 4: Ionic Conductivity ---
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, avg_ionic_cond, color='tab:orange', linewidth=2, label="Ionic (Electrolyte)")
+    # plt.title("Ionic Conductivity")
+    plt.ylabel("Conductivity [S/m]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    # --- Plot 5: Thermal Evolution ---
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, avg_temp_C, 'r-o', linewidth=1.5, markersize=4, label="Avg Discharge Temp")
+    # plt.title("Thermal Evolution")
+    plt.ylabel("Temperature [°C]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    # --- Plot 6: Diagnostic Voltage Curves ---
+    plt.figure(figsize=(8, 6))
+    plt.plot(q_fresh, v_fresh, 'b-', linewidth=2.5, label="Cycle 1")
+    plt.plot(q_aged, v_aged, 'r-', linewidth=2.5, label=f"Cycle {len(sol.cycles)}")
+    # plt.title("Diagnostic Voltage Profiles")
+    plt.ylabel("Voltage [V]")
+    plt.xlabel("Discharge Capacity [Ah]")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
     plt.show()
 
 
-#==============================$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$======================================
-#===================Porosity=================Porosity===================Porosity===============Porosity============
+# --- Run ---
+# generate_individual_plots(sol)
 
-#-----------------------------X-averaged Porosity in different Si%-------------------------
-per_cycle = 3
-mid=1.5
+# --- Run Analysis ---
+# analyze_depth_soh(sol)
+'''def plot_individual_soh_area(sol):
+    # 1. Initialize Lists
+    cycle_numbers = []
+    soh_ni = []
+    soh_fe = []
+    soh_system = []
+    ion, elec = [], []
 
-fig, ax = plt.subplots(figsize=(7.5, 6))
-ax.plot(tp_list[0],X_Por[0],linestyle="-", lw=3, label="0.5C", color="midnightblue")
-ax.plot(tp_list[1],X_Por[1],linestyle="--", lw=3, label="1C", color="royalblue")
-ax.plot(tp_list[2],X_Por[2],linestyle=":", lw=3, label="2C", color="cornflowerblue")
+    for cycle_idx, cycle_sol in enumerate(sol.cycles):
 
-ax.fill_betweenx([0, 0.2502], 0, mid, color="linen", alpha=1)
-ax.fill_betweenx([0, 0.2502], mid, per_cycle, color="lavender", alpha=1)
-ax.set_ylim(0.2478, 0.2505)
-ax.set_xlim(-0.05 * per_cycle, 1.05 * per_cycle)
-ax.set_xlabel("Throughput Capacity [A·h]")
-#ax.set_yticks([0.24955, 0.24965, 0.24975, 0.24985])
-ax.set_xticks([0, 1.5, 3])
-ax.set_yticks([0.2480, 0.2485, 0.2490, 0.2495, 0.2500])
-ax.set_ylabel("Porosity")
-ax.spines["bottom"].set_position(("data", 0.2478))
-ax.xaxis.set_ticks_position("bottom")
-y0 = 0.2502
-ax.annotate("", xy=(0, y0), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
-ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
-                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
-ax.text(mid / 2, 0.25027, "0.3C Charge cc-cv", ha="center", fontsize=MEDIUM_SIZE)
-ax.text(mid + (per_cycle - mid) / 2, 0.25027, "Discharge", ha="center", fontsize=MEDIUM_SIZE)
+        # A cycle tuple (Discharge, Charge) contains multiple steps
+        for step_sol in cycle_sol.steps:
 
-first_legend = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
-ax.add_artist(first_legend)
-plt.tight_layout()
-fname = "Por_X_avg"
-fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
-fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
+            # Check for Discharge (avg current < -0.1)
+            current = step_sol["Current [A]"].entries
+            if np.mean(current) < -0.1:
+                # Get Area Fraction at the END of the discharge step
+                ni_area = step_sol["Active area fraction (Ni)"].entries[-1] * 100
+                fe_area = step_sol["Active area fraction (Fe)"].entries[-1] * 100
+                ionic = np.mean(step_sol["Ionic conductivity [S.m-1]"].entries, axis=0)
+                electronic = np.mean(step_sol["Electronic conductivity [S.m-1]"].entries, axis=0)
+                ion.append(ionic)
+                elec.append(electronic)
 
-plt.show()
+                # Calculate System SOH (Weighted Average)
+                system_val = (0.8 * ni_area) + (0.2 * fe_area)
 
-#-------------------X-averaged \ current collector \ seperator side porosity evolution ----------------------#
+                soh_ni.append(ni_area)
+                soh_fe.append(fe_area)
+                soh_system.append(system_val)
 
+                # USE THE ENUMERATED INDEX (Robust)
+                cycle_numbers.append(cycle_idx + 1)
 
-c_rates = [0.5, 1, 2]
-for i in range(3):  # for indices 0, 1, 2
-    fig, ax = plt.subplots(figsize=(7.5, 6))
-    mid = 1.5
-    per_cycle = 3
-    ax.plot(tp_list[i], X_Por[i], "-", lw=3, label="Avg", color="midnightblue")
-    ax.plot(tp_list[i], s_Por[i], "--", lw=3, label="Sep", color="royalblue")
-    ax.plot(tp_list[i], cc_Por[i], ":", lw=3, label="CC", color="cornflowerblue")
+    # 3. Plotting (3 Subplots)
+    plt.figure(figsize=(8, 6))
 
-    ax.fill_betweenx([0, 0.2502], 0, mid, color="linen", alpha=1)
-    ax.fill_betweenx([0, 0.2502], mid, per_cycle, color="lavender", alpha=1)
-    ax.set_ylim(0.2478, 0.2505)
-    ax.set_xlim(-0.05 * per_cycle, 1.05 * per_cycle)
-    ax.set_xlabel("Throughput Capacity [A·h]")
-    #ax.set_yticks([0.24955, 0.24965, 0.24975, 0.24985])
-    ax.set_xticks([0, 1.5, 3])
-    ax.set_yticks([0.2480, 0.2485, 0.2490, 0.2495, 0.2500])
-    ax.set_ylabel("Porosity")
-    ax.spines["bottom"].set_position(("data", 0.2478))
-    ax.xaxis.set_ticks_position("bottom")
-    y0 = 0.2502
-    ax.annotate("", xy=(0, y0), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
-    ax.annotate("", xy=(mid, y0), xytext=(per_cycle, y0),
-                arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"))
-    ax.text(mid / 2, 0.25027, "0.3C Charge cc-cv", ha="center", fontsize=MEDIUM_SIZE)
-    ax.text(mid + (per_cycle - mid) / 2, 0.25027, f"{c_rates[i]}C Discharge", ha="center", fontsize=MEDIUM_SIZE)
-
-    first_legend = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
-    ax.add_artist(first_legend)  # Add the first legend as an artist
-
+    # --- Plot 1: System SOH (Weighted) ---
+    plt.plot(cycle_numbers, soh_system, 'b-o', linewidth=2, markersize=4,label="System SOH")
+    #plt.title("1. System SOH (Weighted Area)")
+    plt.ylabel("State of Health [%]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
     plt.tight_layout()
-    fname = f"Por_saptial_{c_rates[i]}C"
-    fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=1200)
-    fig.savefig(os.path.join(out_dir, fname + ".svg"), dpi=1200)
-    #plt.close(fig)
     plt.show()
-    '''
+
+    # --- Plot 2: Nickel SOH ---
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, soh_ni, 'g-s', linewidth=2, markersize=4, label="Ni SOH")
+    #plt.title("2. Nickel SOH (Active Area)")
+    plt.ylabel("Active Area [%]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    # --- Plot 3: Iron SOH ---
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, soh_fe, 'r-^', linewidth=2, markersize=4, label="Fe SOH")
+    #plt.title("3. Iron SOH (Active Area)")
+    plt.ylabel("Active Area [%]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, ion, 'r-^', linewidth=2, markersize=4, label="ionic conductivity")
+    # plt.title("3. Iron SOH (Active Area)")
+    plt.ylabel("ionic conductivity [S.m-1]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(cycle_numbers, elec, 'r-^', linewidth=2, markersize=4, label="elec conductivity")
+    # plt.title("3. Iron SOH (Active Area)")
+    plt.ylabel("elec conductivity [S.m-1]")
+    plt.xlabel("Cycle Number")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_end_cycle_dynamics(sol):
+    # 1. Get the Last Cycle
+    # Check if cycles exist
+    if not hasattr(sol, "cycles") or not sol.cycles:
+        print("No cycles found. Plotting full simulation.")
+        target_sol = sol
+    else:
+        # Get the last cycle object (Discharge + Charge)
+        target_sol = sol.cycles[-1]
+
+    # 2. Extract Time
+    # Convert to hours
+    t_plot = target_sol["Time [h]"].entries
+    v = target_sol["Voltage [V]"].entries
+    dod = target_sol["Depth of Discharge"].entries
+
+    # 3. Extract & Process Variables (Robust Check)
+
+    # --- Temperature ---
+    temp_data = target_sol["Cell temperature [K]"].entries
+    # Check dimensions: If 2D (Space x Time), Average it. If 1D (Time), keep it.
+    if temp_data.ndim > 1:
+        temp_plot = np.mean(temp_data, axis=0) - 273.15
+    else:
+        temp_plot = temp_data - 273.15
+
+    # --- Ionic Conductivity ---
+    ionic_data = target_sol["Ionic conductivity [S.m-1]"].entries
+    if ionic_data.ndim > 1:
+        ionic_plot = np.mean(ionic_data, axis=0)
+    else:
+        ionic_plot = ionic_data
+
+    # --- Electronic Conductivity ---
+    elec_data = target_sol["Electronic conductivity [S.m-1]"].entries
+    if elec_data.ndim > 1:
+        elec_plot = np.mean(elec_data, axis=0)
+    else:
+        elec_plot = elec_data
+
+    # 4. Plotting (3 Separate Figures as requested)
+
+    # Plot 1: Temperature
+    plt.figure(figsize=(8, 6))
+    plt.plot(t_plot, temp_plot, 'r-', linewidth=3, label="Cell Temp")
+    plt.ylabel("Temperature [°C]")
+    plt.xlabel("Time [h]")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    # Plot 2: Ionic Conductivity (Electrolyte)
+    plt.figure(figsize=(8, 6))
+    plt.plot(t_plot, ionic_plot, 'b-', linewidth=3, label="Ionic Conductivity")
+    plt.ylabel("Conductivity [S/m]")
+    plt.xlabel("Time [h]")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    # Plot 3: Electronic Conductivity (Metal)
+    plt.figure(figsize=(8, 6))
+    plt.plot(t_plot, elec_plot, 'k-', linewidth=3, label="Electronic Conductivity")
+    plt.ylabel("Conductivity [S/m]")
+    plt.xlabel("Time [h]")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    #plot 4: Voltage
+    plt.figure(figsize=(8, 6))
+    plt.plot(dod, v, 'g-', linewidth=3, label="Voltage")
+    plt.ylabel("Voltage [V]")
+    plt.xlabel("Time [h]")
+    plt.grid(True)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()'''
+
+if __name__ == "__main__":
+        run_experiment_simulation()
+
+
+
+
+
+
+
+
+
+
+
 
 
