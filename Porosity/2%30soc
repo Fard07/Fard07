@@ -1,0 +1,513 @@
+import os
+import matplotlib.pyplot as plt
+import numpy as np
+import pybamm
+from matplotlib import style
+import matplotlib
+
+matplotlib.use("TkAgg")
+import datetime
+
+out_dir = r"D:\Porosity Plots\2% 30Soc"
+os.makedirs(out_dir, exist_ok=True)
+
+# ─── Styling ─────────────────────────
+style.use('ggplot')
+pybamm.set_logging_level("INFO")
+
+SMALL_SIZE, MEDIUM_SIZE, BIGGER_SIZE = 20, 24, 26
+plt.rcParams["font.family"] = "Times New Roman"
+plt.rcParams['axes.facecolor'] = 'none'
+plt.rcParams['axes.edgecolor'] = 'black'
+plt.rc('font', size=MEDIUM_SIZE)
+plt.rc('axes', titlesize=MEDIUM_SIZE)
+plt.rc('axes', labelsize=MEDIUM_SIZE)
+plt.rc('xtick', labelsize=MEDIUM_SIZE)
+plt.rc('ytick', labelsize=MEDIUM_SIZE)
+plt.rc('legend', fontsize=SMALL_SIZE)
+plt.rc('figure', titlesize=BIGGER_SIZE)
+
+# Directory setup
+#out_dir = r"E:\MTP project\Results\porousAnodeResult\16.7.25\BOL-C-rate-30%soc"
+#os.makedirs(out_dir, exist_ok=True)
+
+# Parameters
+#Si_vol_fracs = 0.075  # Secondary (Si) - 7.5% volume fraction
+#total_AM_frac = 0.75  # Total active material
+
+# ─── C‑rates and Cycles ─────────────────────────
+c_rates = [ 1.0]
+#c_rates = [0.5]
+cycles_per_simulation = [2600]  # 2000 cycles 2C, # 3450 cycles 0.5C, # 2600 cycles for 1C
+#cycles_per_simulation = [3450, 2600, 2000]
+
+# Storage arrays for Spatial Plots
+tp_list = []
+si_pct_list, gr_pct_list = [], []
+Vsi_pct_list, Vgr_pct_list = [], []
+disp_Si_list, disp_Gr_list = [], []
+cc_Si, s_Si, cc_Gr, s_Gr, X_Por, cc_Por, s_Por = [], [], [], [], [], [], []
+
+# Storage arrays for Degradation Tracking
+sol_list = []
+LLI, LAM_neg, lam_gr, lam_si, LAM_pos, SEI_list = [], [], [], [], [], []
+
+# Storage arrays for RPT / SoH Plotting
+all_rpt_capacities, tp_EoL_list, tp_BoL_list = [], [], []
+all_throughput_lists, por_xavg_BoL_list, por_xavg_EoL_list = [], [], []
+all_soh_lists, all_cycle_lists = [], []
+
+# Storage arrays for Continuous Degradation Line Graph
+cont_tp_list, cont_lli_list = [], []
+cont_lam_neg_list, cont_lam_pos_list = [], []
+cont_lam_gr_list, cont_lam_si_list = [], []
+
+pri_lam = [2.8e-06]
+sec_lam = [2.5e-08]
+
+# ─── Loop: run sim for each C‑rate ────────────────
+for idx_c, (c_rate, n_cycle) in enumerate(zip(c_rates, cycles_per_simulation)):
+
+    #eps_s = Si_vol_fracs
+    #eps_p = total_AM_frac - eps_s
+
+    model = pybamm.lithium_ion.DFN({
+        "particle phases": ("2", "1"),
+        "open-circuit potential": (("single", "current sigmoid"), "single"),
+        "particle mechanics": ("swelling only", "swelling only"),  # Positive kept to 'none' to prevent crashing
+        "loss of active material": ("stress-driven", "stress-driven"),
+        "SEI": "solvent-diffusion limited",
+        "SEI porosity change": "true",
+        "particle": "Fickian diffusion",
+        "cell geometry": "arbitrary",
+        "lithium plating": "partially reversible",
+        "lithium plating porosity change": "true",
+    })
+
+    parameter_values = pybamm.ParameterValues("Chen2020_composite")
+
+    parameter_values.update({
+        "Lithium plating transfer coefficient": 0.5,
+        "Dead lithium decay constant [s-1]": 1e-4,
+        "Primary: Maximum concentration in negative electrode [mol.m-3]": 28700,
+        "Primary: Initial concentration in negative electrode [mol.m-3]": 23000,
+        "Secondary: Initial concentration in negative electrode [mol.m-3]": 277000,
+        "Secondary: Maximum concentration in negative electrode [mol.m-3]": 278000,
+        "Positive electrode LAM constant proportional term [s-1]": 4e-07,#1.7778e-07,
+        "Secondary: Negative electrode partial molar volume [m3.mol-1]": 1.20e-05,
+        "Positive electrode partial molar volume [m3.mol-1]": 1.2e-06,
+
+        "Primary: Negative electrode LAM constant proportional term [s-1]": 2.8e-06,
+        "Secondary: Negative electrode LAM constant proportional term [s-1]": 3.5e-08,
+        "Primary: Outer SEI solvent diffusivity [m2.s-1]": 2.5e-24,
+        "Secondary: Outer SEI solvent diffusivity [m2.s-1]": 9.5e-22,
+        "Primary: Dead lithium decay constant [s-1]": 4e-05,  # Reduced from 1e-06
+        "Secondary: Dead lithium decay constant [s-1]":1e-05,  # Reduced from 1e-06
+
+        #"Secondary: Negative electrode active material volume fraction": eps_s,
+        #"Primary: Negative electrode active material volume fraction": eps_p,
+    }, check_already_exists=False)
+
+    # ─── DYNAMIC EXPERIMENT SETUP ───
+    aging_cycle = [(
+        f"Discharge at {c_rate}C until 2.5V",
+        "Charge at 0.3C for 3600 seconds (3 minute period)",  # Partial 30% SoC Charge
+    )]
+
+    # Unified RPT: Starts at ~30%, tops off, measures, resets to 100%
+    rpt_cycle = [(
+        "Charge at 0.3C until 4.2V (3 minute period)",  # Step 0: Bring to 100%
+        "Hold at 4.2V until C/100 (3 minute period)",  # Step 1: Saturate
+        "Discharge at 0.1C until 2.5V",  # Step 2: MEASUREMENT (Shifted from Step 3 to Step 2)
+        "Charge at 0.3C for 3600 seconds (3 minute period)",  # Step 3: Reset to 100% for next aging block
+    )]
+
+    # 1. Start immediately with 5 Aging Cycles
+    experiment_plan = aging_cycle * 5
+
+    # 2. Append the 1st RPT
+    experiment_plan += rpt_cycle.copy()
+
+    # 3. Calculate remaining cycles to simulate
+    remaining_cycles = n_cycle - 5
+    chunks = remaining_cycles // 100
+    remainder = remaining_cycles % 100
+
+    # 4. Append the rest in chunks of 100
+    for _ in range(chunks):
+        experiment_plan += aging_cycle * 100
+        experiment_plan += rpt_cycle.copy()
+
+    if remainder > 0:
+        experiment_plan += aging_cycle * remainder
+        experiment_plan += rpt_cycle.copy()
+
+    experiment = pybamm.Experiment(experiment_plan, period="180 seconds")
+
+    # Use robust CasADi solver to survive 3200 cycles
+    sim = pybamm.Simulation(
+        model,
+        experiment=experiment,
+        parameter_values=parameter_values,
+        solver=pybamm.IDAKLUSolver(atol=1e-8, rtol=1e-6, options={"linear_solver": "SUNLinSol_KLU"}),
+    )
+    solution = sim.solve(calc_esoh=False)
+    sol_list.append(solution)
+
+    # ─── DYNAMIC DATA EXTRACTION ───
+    rpt_indices = [5]  # First RPT is always cycle 5
+    current_idx = 5
+
+    for _ in range(chunks):
+        current_idx += 101
+        rpt_indices.append(current_idx)
+    if remainder > 0:
+        current_idx += remainder + 1
+        rpt_indices.append(current_idx)
+
+    rpt_capacities = []
+    throughput_for_rpt = []
+
+    for i in rpt_indices:
+        rpt_cycle_data = solution.cycles[i]
+
+        # CRITICAL FIX: Capacity measurement is now at step 2, not step 3.
+        cap = rpt_cycle_data.steps[2]["Discharge capacity [A.h]"].entries
+        true_cap = cap[-1] - cap[0]  # Drift correction
+        tp = rpt_cycle_data["Throughput capacity [A.h]"].entries[-1] / 1000  # Convert to kA.h
+
+        rpt_capacities.append(true_cap)
+        throughput_for_rpt.append(tp)
+
+    soh_rpt = [(cap1 / rpt_capacities[0]) * 100 for cap1 in rpt_capacities]
+
+    # Shift the throughput so the graph starts exactly at 0 for the first RPT
+    tp_offset = throughput_for_rpt[0]
+    throughput_shifted = [t - tp_offset for t in throughput_for_rpt]
+
+    all_rpt_capacities.append(rpt_capacities)
+    all_throughput_lists.append(throughput_shifted)
+    all_soh_lists.append(soh_rpt)
+    all_cycle_lists.append(rpt_indices)
+
+    print(f"\n=== {c_rate}C RESULTS ===")
+    print("RPT SoH [%]:", [f"{s:.2f}" for s in soh_rpt])
+
+    aging_idx_BoL = rpt_indices[0] - 1
+    aging_idx_EoL = rpt_indices[-1] - 1
+
+    cyc_BoL = solution.cycles[aging_idx_BoL]
+    cyc_EoL = solution.cycles[aging_idx_EoL]
+
+    por_xavg_BoL_list.append(cyc_BoL["X-averaged negative electrode porosity"].entries)
+    por_xavg_EoL_list.append(cyc_EoL["X-averaged negative electrode porosity"].entries)
+
+    tp_BoL_raw = cyc_BoL["Throughput capacity [A.h]"].entries
+    tp_EoL_raw = cyc_EoL["Throughput capacity [A.h]"].entries
+
+    tp_BoL_list.append(tp_BoL_raw - tp_BoL_raw[0])
+    tp_EoL_list.append(tp_EoL_raw - tp_EoL_raw[0])
+
+    # Extract EoL metrics
+    cyc_rpt_eol = solution.cycles[-1]
+
+    LAM_neg.append(cyc_rpt_eol["Loss of active material in negative electrode [%]"].entries[-1])
+    LAM_pos.append(cyc_rpt_eol["Loss of active material in positive electrode [%]"].entries[-1])
+    LLI.append(cyc_rpt_eol["Loss of lithium inventory [%]"].entries[-1])
+
+    vol_gr = solution["X-averaged negative electrode primary active material volume fraction"].entries
+    vol_si = solution["X-averaged negative electrode secondary active material volume fraction"].entries
+
+    lam_gr.append(((vol_gr[0] - vol_gr[-1]) / vol_gr[0]) * 100)
+    lam_si.append(((vol_si[0] - vol_si[-1]) / vol_si[0]) * 100)
+
+    # ─── SPATIAL DATA EXTRACTION ───
+    cyc_aging = solution.cycles[-2]
+
+    # Shift the throughput array so it fits inside the [0, 3] plot boundaries
+    tp_raw = cyc_aging["Throughput capacity [A.h]"].entries
+    tp_shifted = tp_raw - tp_raw[0]
+    tp_list.append(tp_shifted)
+
+    Rs = parameter_values["Secondary: Negative particle radius [m]"]
+    Rp = parameter_values["Primary: Negative particle radius [m]"]
+
+    disp_Si = cyc_aging["X-averaged negative secondary particle surface displacement [m]"].entries + Rs
+    disp_Gr = cyc_aging["X-averaged negative primary particle surface displacement [m]"].entries + Rp
+
+    Vsi_pct = 3 * (disp_Si - Rs) / Rs * 100
+    Vgr_pct = 3 * (disp_Gr - Rp) / Rp * 100
+
+    Vsi_pct_list.append(Vsi_pct)
+    Vgr_pct_list.append(Vgr_pct)
+    disp_Si_list.append(disp_Si)
+    disp_Gr_list.append(disp_Gr)
+
+    # ─── CONTINUOUS DEGRADATION EXTRACTION ───
+    cont_tp_list.append(solution["Throughput capacity [A.h]"].entries)
+    cont_lli_list.append(solution["Loss of lithium inventory [%]"].entries)
+    cont_lam_neg_list.append(solution["Loss of active material in negative electrode [%]"].entries)
+    cont_lam_pos_list.append(solution["Loss of active material in positive electrode [%]"].entries)
+
+    vol_gr_cont = solution["X-averaged negative electrode primary active material volume fraction"].entries
+    vol_si_cont = solution["X-averaged negative electrode secondary active material volume fraction"].entries
+    cont_lam_gr_list.append(((vol_gr_cont[0] - vol_gr_cont) / vol_gr_cont[0]) * 100)
+    cont_lam_si_list.append(((vol_si_cont[0] - vol_si_cont) / vol_si_cont[0]) * 100)
+
+
+# =========================================================================================
+# PLOT: Consolidated Continuous Degradation Tracking (Line Graph)
+# =========================================================================================
+fig, ax = plt.subplots(figsize=(8, 6))
+
+# Define metrics with dedicated colors and distinct line styles
+continuous_metrics = [
+    ("Loss of Lithium Inventory (LLI)", cont_lli_list, 'darkorange', '-', 1.5),
+    ("Total LAM (Anode)", cont_lam_neg_list, 'royalblue', '-', 3),
+    ("Total LAM (Cat)", cont_lam_pos_list, 'crimson', '-', 3),
+    (r"LAM$_{Gr}$", cont_lam_gr_list, 'darkgreen', '--', 3),
+    (r"LAM$_{Si}$", cont_lam_si_list, 'lightsteelblue', '-.', 3),
+
+]
+
+# Extract index 0 since c_rates = [1]
+tp_kAh = cont_tp_list[0] / 1000.0
+
+for title, data_list, line_color, line_style, line_width in continuous_metrics:
+    ax.plot(tp_kAh, data_list[0], lw=line_width, color=line_color, linestyle=line_style, label=title)
+
+ax.set_xlabel("Throughput Capacity [kA.h]")
+ax.set_ylabel("Loss [%]")
+
+# Ground the plot exactly at 0 on the bottom spine
+ax.spines["bottom"].set_position(("data", 0))
+ax.xaxis.set_ticks_position("bottom")
+
+# Dynamically set X and Y limits based on the data
+ax.set_xlim(0, max(tp_kAh) * 1.05)
+ax.set_ylim(0, 85)
+
+leg = ax.legend(loc="upper left", frameon=False, fontsize=SMALL_SIZE)
+for text in leg.get_texts():
+    text.set_color("black")
+
+plt.tight_layout()
+fname = "Degradation_30Soc"
+#fig.savefig(os.path.join(out_dir, fname + ".svg"), format="svg", dpi=1200)
+#fig.savefig(os.path.join(out_dir, fname + ".jpg"), format="jpg", dpi=1200)
+plt.show()
+
+# =========================================================================================
+# PLOT 1: State of Health (SoH) vs Charge Throughput
+# ==========================================================================================
+
+fig, ax = plt.subplots(figsize=(10, 7))
+
+colors = ['midnightblue', 'royalblue', 'cornflowerblue'][:len(c_rates)]
+for i, c_rate in enumerate(c_rates):
+    ax.plot(all_throughput_lists[i], all_soh_lists[i], marker='o', markersize=8, lw=3, color=colors[i],
+            label=f"{c_rate}C Aging")
+
+ax.set_xlabel("cycle no.")
+ax.set_ylabel("State of Health [%]")
+#ax.set_title("Capacity Retention vs Charge Throughput (0.1C RPT)")
+ax.set_ylim(40, 105)
+ax.grid(True, linestyle="--", alpha=0.6)
+
+leg = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
+for text in leg.get_texts():
+    text.set_color("black")
+
+plt.tight_layout()
+plt.show()
+
+# =========================================================================================
+# PLOT 2: End of Life Degradation Metrics Bar Chart
+# =========================================================================================
+c_rate_labels = [f"{c}C" for c in c_rates]
+x = np.arange(len(c_rate_labels))
+width = 0.12
+
+fig, ax = plt.subplots(figsize=(12, 7))
+
+bar1 = ax.bar(x - 2.5 * width, LAM_neg, width, label='Total LAM (Neg)', color='midnightblue')
+bar2 = ax.bar(x - 1.5 * width, lam_gr, width, label='Graphite LAM', color='darkgreen')
+bar3 = ax.bar(x - 0.5 * width, lam_si, width, label='Silicon LAM', color='lightsteelblue')
+bar4 = ax.bar(x + 0.5 * width, LAM_pos, width, label='Total LAM (Pos)', color='crimson')
+bar5 = ax.bar(x + 1.5 * width, LLI, width, label='LLI', color='orange')
+
+
+label_size = 14
+for bar_group in [bar1, bar2, bar3, bar4, bar5]:
+    ax.bar_label(bar_group, fmt='%.2f', padding=4, fontsize=label_size, rotation=90)
+
+ax.set_xlabel('Aging C-rate')
+ax.set_ylabel('Degradation [%]')
+ax.set_title('End of Life Degradation Breakdown')
+ax.set_xticks(x)
+ax.set_xticklabels(c_rate_labels)
+ax.spines["bottom"].set_position(("data", 0))
+ax.xaxis.set_ticks_position("bottom")
+
+if LAM_neg:
+    max_y_value = max([max(LAM_neg), max(lam_gr), max(lam_si), max(LAM_pos), max(LLI)])
+    ax.set_ylim(0, max_y_value * 1.35)
+
+leg = ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=SMALL_SIZE)
+for text in leg.get_texts():
+    text.set_color("black")
+
+plt.tight_layout()
+plt.show()
+
+# ====================================a=====================================================
+# SPATIAL PLOTS
+# =========================================================================================
+# ───           porosity plots ────────────────────────
+
+fig, ax = plt.subplots(figsize=(8, 6))
+for i, c in enumerate(c_rates):
+
+    ax.plot(tp_BoL_list[i], por_xavg_BoL_list[i], ls='-', lw=3, label="BoL", color='midnightblue')
+    ax.plot(tp_EoL_list[i], por_xavg_EoL_list[i], ls='-', lw=3,label="EoL", color='royalblue')
+
+ax.set_xlabel("Throughput Capacity [A·h]")
+ax.set_ylabel("Porosity")
+
+# Dynamically set X-axis based on the longest local cycle
+max_tp = max(max(tp_BoL_list[0]), max(tp_EoL_list[0]))
+ax.set_xlim(-0.05, max_tp * 1.05)
+tp_switch_BoL = np
+
+y0 = 0.2508
+idx_switch_BoL = len(cyc_BoL.steps[0]["Throughput capacity [A.h]"].entries) - 1
+tp_switch_BoL = tp_BoL_list[0][idx_switch_BoL]
+max_tp_BoL = np.max(tp_BoL_list[0])
+
+ax.annotate("", xy=(0, y0+0.0003), xytext=(tp_switch_BoL, y0+0.0003), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"), annotation_clip=False)
+ax.text(tp_switch_BoL / 2, y0 + 0.001, "1C Discharge", ha="center", fontsize=MEDIUM_SIZE, color='black')
+
+ax.annotate("", xy=(tp_switch_BoL, y0+0.0003), xytext=(max_tp_BoL, y0+0.0003), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"), annotation_clip=False)
+ax.text(tp_switch_BoL + (max_tp_BoL - tp_switch_BoL) / 2, y0 + 0.001, "0.3C Charge cc-cv", ha="center", fontsize=MEDIUM_SIZE, color='black')
+
+ax.set_ylim(0.22 - 0.005, 0.25 + 0.005)
+ax.spines["bottom"].set_position(("data", 0.22 - 0.005))
+ax.set_xlim(-0.05 * 3, 1.05 * 3)
+ax.set_xticks([0, 1.5, 3])
+ax.set_yticks([0.22, 0.23, 0.24, 0.25])
+
+leg = ax.legend(loc="lower right", frameon=False, fontsize=SMALL_SIZE)
+for text in leg.get_texts():
+    text.set_color("black")
+
+plt.tight_layout()
+fname = "Porosity_30Soc"
+#fig.savefig(os.path.join(out_dir, fname + ".svg"), format="svg", dpi=1200)
+#fig.savefig(os.path.join(out_dir, fname + ".jpg"), format="jpg", dpi=1200)
+plt.show()
+
+#================================================================================================================
+# ─── Combined Silicon Volume Change plot ────────────────────────
+fig, ax = plt.subplots(figsize=(8, 6))
+line_styles = ['-', '--', ':'][:len(c_rates)]
+
+for i, c in enumerate(c_rates):
+    ax.plot(tp_list[i], Vsi_pct_list[i], ls=line_styles[i], lw=3, label=f"{c}C", color=colors[i])
+
+y_max = 3 * 108
+mid = 1.5
+y0 = y_max + 3
+
+ax.fill_betweenx([-0.1, y_max], 0, mid, color="linen", alpha=1)
+ax.fill_betweenx([-0.1, y_max], mid, 3, color="lavender", alpha=1)
+
+ax.annotate("", xy=(0, y0), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
+            annotation_clip=False)
+ax.text(mid / 2, y0 + y_max * 0.01, "Discharge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+ax.annotate("", xy=(mid, y0), xytext=(3, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
+            annotation_clip=False)
+ax.text(mid + (3 - mid) / 2, y0 + y_max * 0.01, "0.3C Charge CC", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+ax.spines["bottom"].set_position(("data", 0))
+ax.xaxis.set_ticks_position("bottom")
+ax.set_xlabel("Throughput Capacity [A·h]")
+ax.set_ylabel("Volume change [%]")
+ax.set_ylim(0, 122 * 3)
+ax.set_xticks([0, 1.5, 3])
+
+leg = ax.legend(loc="lower left", frameon=False, fontsize=SMALL_SIZE)
+for text in leg.get_texts():
+    text.set_color("black")
+
+plt.tight_layout()
+plt.show()
+
+# ─── Combined Graphite Radius plot ────────────────────────
+fig, ax = plt.subplots(figsize=(8, 6))
+
+for i, c in enumerate(c_rates):
+    ax.plot(tp_list[i], disp_Gr_list[i], ls=line_styles[i], lw=3, label=f"{c}C", color=colors[i])
+
+y_max = 6.03e-6
+mid = 1.5
+y0 = y_max
+per_cycle = 3
+
+ax.fill_betweenx([0, y_max], 0, mid, color="linen", alpha=1)
+ax.fill_betweenx([0, y_max], mid, per_cycle, color="lavender", alpha=1)
+
+ax.annotate("", xy=(0, y_max), xytext=(mid, y0), arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"),
+            annotation_clip=False)
+ax.text(mid / 2, y0 + 0.002e-6, "Discharge", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+ax.annotate("", xy=(mid, y_max), xytext=(per_cycle, y0),
+            arrowprops=dict(arrowstyle="<|-|>", linewidth=2, color="black"), annotation_clip=False)
+ax.text(mid + (per_cycle - mid) / 2, y0 + 0.002e-6, "0.3C Charge CC", ha="center", va="bottom", fontsize=MEDIUM_SIZE)
+
+ax.spines["bottom"].set_position(("data", 5.85e-6))
+ax.xaxis.set_ticks_position("bottom")
+ax.set_xlabel("Throughput Capacity [A.h]")
+ax.set_ylabel("Radius [m]")
+ax.set_xlim(-0.05 * per_cycle, 1.055 * per_cycle)
+ax.set_ylim(5.85e-6, 6.06e-6)
+ax.set_xticks([0, 1.5, 3])
+
+first_legend = ax.legend(loc="center right", frameon=False, fontsize=SMALL_SIZE)
+ax.add_artist(first_legend)
+
+plt.tight_layout()
+plt.show()
+
+
+# 1. Access the specific Discharge Step (Step 0 is always the first step)
+# This assumes the first step of both the aging cycle and RPT cycle is the discharge.
+discharge_BoL = sol_list[0].cycles[4].steps[1]
+discharge_EoL = sol_list[0].cycles[-2].steps[1]
+
+# 2. Extract data from the step object
+time_BoL = discharge_BoL["Time [s]"].entries
+curr_BoL = discharge_BoL["Current [A]"].entries
+time_EoL = discharge_EoL["Time [s]"].entries
+curr_EoL = discharge_EoL["Current [A]"].entries
+
+# 3. Align to start at t=0
+time_BoL_norm = time_BoL - time_BoL[0]
+time_EoL_norm = time_EoL - time_EoL[0]
+
+# 4. Plot
+plt.figure(figsize=(8, 6))
+plt.plot(time_BoL_norm, curr_BoL, label="BoL charge", lw=2, color='orangered')
+plt.plot(time_EoL_norm, curr_EoL, label="EoL charge", lw=2, color='royalblue', linestyle="--")
+
+plt.xlabel("Time from Start of Discharge [s]")
+plt.ylabel("Current [A]")
+plt.title("Aligned Discharge Duration Comparison")
+plt.legend(frameon=False)
+plt.tight_layout()
+plt.show()
+
+# Add this check at the very end of your simulation loop
+print(f"\n--- Degradation Diagnostic Check ---")
+print(f"Final LLI: {LLI[-1]:.4f} %")
+print(f"Final LAM (Neg): {LAM_neg[-1]:.4f} %")
+print(f"Final LAM (Pos): {LAM_pos[-1]:.4f} %")
